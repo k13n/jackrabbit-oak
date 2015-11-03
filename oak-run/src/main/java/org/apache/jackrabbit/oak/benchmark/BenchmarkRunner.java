@@ -317,7 +317,9 @@ public class BenchmarkRunner {
             new LucenePropertyFTSeparated(
                 wikipedia.value(options),
                 flatStructure.value(options),
-                report.value(options), withStorage.value(options))
+                report.value(options), withStorage.value(options)),
+            new IndexConflictsProvokingTest(),
+            new IndexConflictsNonProvokingTest(),
         };
 
         Set<String> argset = Sets.newHashSet(nonOption.values(options));

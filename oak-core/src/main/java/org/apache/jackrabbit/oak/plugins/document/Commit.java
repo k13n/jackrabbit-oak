@@ -24,6 +24,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
@@ -64,6 +65,7 @@ public class Commit {
     private final JsopWriter diff = new JsopStream();
     private final Set<Revision> collisions = new LinkedHashSet<Revision>();
     private Branch b;
+    public static final AtomicInteger conflictCounter = new AtomicInteger();
 
     /**
      * List of all node paths which have been modified in this commit. In addition to the nodes
@@ -405,6 +407,7 @@ public class Commit {
                                     commitRootDoc.getMostRecentConflictFor(
                                         Collections.singleton(revision), nodeStore));
                         }
+                        conflictCounter.incrementAndGet();
                         throw dse;
                     } else {
                         success = true;
@@ -579,6 +582,7 @@ public class Commit {
                             ",\nrevision order:\n" +
                             nodeStore.getRevisionComparator());
                 }
+                conflictCounter.incrementAndGet();
                 throw new ConflictException(conflictMessage, conflictRevision);
             }
         }
