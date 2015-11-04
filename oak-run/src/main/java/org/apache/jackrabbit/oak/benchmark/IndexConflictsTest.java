@@ -44,9 +44,13 @@ public abstract class IndexConflictsTest extends AbstractTest<Void> {
     @Override
     public void beforeSuite() throws RepositoryException {
         nodeCounter = new AtomicInteger();
+
+        // create a new root node under which all children are organized
         Session session = loginWriter();
         session.getRootNode().addNode(ROOT_NODE_NAME, NODE_TYPE);
         session.save();
+
+        // create an index
         PropertyIndex index = new OakIndexUtils.PropertyIndex();
         index.property(INDEXED_PROPERTY);
         index.create(session);
@@ -63,10 +67,9 @@ public abstract class IndexConflictsTest extends AbstractTest<Void> {
         Session session = loginWriter();
         Node rootNode = session.getNode("/" + ROOT_NODE_NAME);
         try {
+            String randomName = UUID.randomUUID().toString();
             for (int i = 0; i < NODES_PER_RUN; i++) {
-                // generate a new node with random name and
-                // assign the indexed property
-                String randomName = UUID.randomUUID().toString();
+                // generate a new node and assign the indexed property
                 Node newNode = rootNode.addNode(randomName, NODE_TYPE);
                 newNode.setProperty(INDEXED_PROPERTY, propertyValue());
                 nodeCounter.incrementAndGet();
@@ -92,6 +95,7 @@ public abstract class IndexConflictsTest extends AbstractTest<Void> {
     protected void afterSuite() throws Exception {
         System.out.println("Nodes created: " + nodeCounter.get());
         System.out.println("Conflicts: " + Commit.conflictCounter.get());
+        System.out.println();
         Commit.conflictCounter.set(0);
     }
 

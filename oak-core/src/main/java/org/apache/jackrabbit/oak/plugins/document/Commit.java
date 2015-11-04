@@ -407,7 +407,6 @@ public class Commit {
                                     commitRootDoc.getMostRecentConflictFor(
                                         Collections.singleton(revision), nodeStore));
                         }
-                        conflictCounter.incrementAndGet();
                         throw dse;
                     } else {
                         success = true;
@@ -428,6 +427,7 @@ public class Commit {
                 operations.put(commitRootPath, commitRoot);
             }
         } catch (DocumentStoreException e) {
+            conflictCounter.incrementAndGet();
             // OAK-3084 do not roll back if already committed
             if (success) {
                 LOG.error("Exception occurred after commit. Rollback will be suppressed.", e);
@@ -582,7 +582,6 @@ public class Commit {
                             ",\nrevision order:\n" +
                             nodeStore.getRevisionComparator());
                 }
-                conflictCounter.incrementAndGet();
                 throw new ConflictException(conflictMessage, conflictRevision);
             }
         }
