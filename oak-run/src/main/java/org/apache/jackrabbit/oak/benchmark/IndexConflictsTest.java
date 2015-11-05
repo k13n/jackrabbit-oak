@@ -67,10 +67,12 @@ public abstract class IndexConflictsTest extends AbstractTest<Void> {
         Session session = loginWriter();
         Node rootNode = session.getNode("/" + ROOT_NODE_NAME);
         try {
-            String randomName = UUID.randomUUID().toString();
+            // use always the same name per thread to avoid
+            // too much garbage in the index (see OAK-2621 and OAK-1557)
+            String nodeName = "node" + Thread.currentThread().getId();
             for (int i = 0; i < NODES_PER_RUN; i++) {
                 // generate a new node and assign the indexed property
-                Node newNode = rootNode.addNode(randomName, NODE_TYPE);
+                Node newNode = rootNode.addNode(nodeName, NODE_TYPE);
                 newNode.setProperty(INDEXED_PROPERTY, propertyValue());
                 nodeCounter.incrementAndGet();
                 session.save();
