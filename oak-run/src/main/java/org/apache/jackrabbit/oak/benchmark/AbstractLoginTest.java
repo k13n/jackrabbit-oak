@@ -75,8 +75,8 @@ abstract class AbstractLoginTest extends AbstractTest {
     }
 
     @Override
-    public void setUp(Repository repository, Credentials credentials) throws Exception {
-        super.setUp(repository, buildCredentials(repository, credentials));
+    public void setUp(Repository[] cluster, Credentials credentials) throws Exception {
+        super.setUp(cluster, buildCredentials(cluster[0], credentials));
         Session s = loginAdministrative();
         try {
             AccessControlUtils.addAccessControlEntry(s, "/", EveryonePrincipal.getInstance(), new String[]{Privilege.JCR_READ}, true);

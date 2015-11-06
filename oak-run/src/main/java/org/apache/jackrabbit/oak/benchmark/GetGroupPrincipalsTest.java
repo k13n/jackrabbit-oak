@@ -48,8 +48,8 @@ public class GetGroupPrincipalsTest extends AbstractTest {
     }
 
     @Override
-    public void setUp(Repository repository, Credentials credentials) throws Exception {
-        super.setUp(repository, credentials);
+    public void setUp(Repository[] cluster, Credentials credentials) throws Exception {
+        super.setUp(cluster, credentials);
 
         session = loginAdministrative();
 

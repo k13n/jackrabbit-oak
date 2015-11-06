@@ -21,6 +21,7 @@ import javax.jcr.Repository;
 
 import org.apache.jackrabbit.api.JackrabbitRepository;
 import org.apache.jackrabbit.oak.Oak;
+import org.apache.jackrabbit.oak.benchmark.IndexConflictsTest;
 
 public class OakRepositoryFixture implements RepositoryFixture {
 
@@ -102,6 +103,8 @@ public class OakRepositoryFixture implements RepositoryFixture {
         cluster = new Repository[oaks.length];
         for (int i = 0; i < oaks.length; i++) {
             cluster[i] = customizer.customize(oaks[i]).createRepository();
+            // avoid conflicts when setting up each repository
+            IndexConflictsTest.optimisticWaitForEventualConsistency();
         }
         return cluster;
     }

@@ -35,9 +35,9 @@ public class LoginSystemTest extends AbstractLoginTest {
     private Subject subject;
 
     @Override
-    public void setUp(Repository repository, Credentials credentials) throws Exception {
-        super.setUp(repository, credentials);
-        if (repository instanceof RepositoryImpl) {
+    public void setUp(Repository[] cluster, Credentials credentials) throws Exception {
+        super.setUp(cluster, credentials);
+        if (cluster[0] instanceof RepositoryImpl) {
             subject = SystemSubject.INSTANCE;
         } else {
             subject = new Subject(true, ImmutableSet.of(new SystemPrincipal()), Collections.emptySet(), Collections.emptySet());

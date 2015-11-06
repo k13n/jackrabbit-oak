@@ -74,7 +74,7 @@ abstract class AbstractTest<T> extends Benchmark implements CSVResultGenerator {
     
     private static final Logger LOG = LoggerFactory.getLogger(AbstractTest.class);
     
-    private Repository repository;
+    private Repository[] cluster;
 
     private Credentials credentials;
 
@@ -87,7 +87,9 @@ abstract class AbstractTest<T> extends Benchmark implements CSVResultGenerator {
     private Profiler profiler;
 
     private PrintStream out;
-    
+
+    private Random random = new Random();
+
     /**
      * <p>
      * used to signal the {@link #runTest(int)} if stop running future test planned or not. If set
@@ -157,9 +159,9 @@ abstract class AbstractTest<T> extends Benchmark implements CSVResultGenerator {
      * @param credentials credentials of a user with write access
      * @throws Exception if the benchmark can not be prepared
      */
-    public void setUp(Repository repository, Credentials credentials)
+    public void setUp(Repository[] cluster, Credentials credentials)
             throws Exception {
-        this.repository = repository;
+        this.cluster = cluster;
         this.credentials = credentials;
         this.sessions = new LinkedList<Session>();
         this.threads = new LinkedList<Thread>();
@@ -193,7 +195,7 @@ abstract class AbstractTest<T> extends Benchmark implements CSVResultGenerator {
             try {
                 Repository[] cluster = createRepository(fixture);
                 try {
-                    runTest(fixture, cluster[0], concurrencyLevels);
+                    runTest(fixture, cluster, concurrencyLevels);
                 } finally {
                     fixture.tearDownCluster();
                 }
@@ -204,9 +206,9 @@ abstract class AbstractTest<T> extends Benchmark implements CSVResultGenerator {
     }
 
 
-    private void runTest(RepositoryFixture fixture, Repository repository, List<Integer> concurrencyLevels) throws Exception {
+    private void runTest(RepositoryFixture fixture, Repository[] cluster, List<Integer> concurrencyLevels) throws Exception {
 
-        setUp(repository, CREDENTIALS);
+        setUp(cluster, CREDENTIALS);
         try {
             
             // Run a few iterations to warm up the system
@@ -397,7 +399,7 @@ abstract class AbstractTest<T> extends Benchmark implements CSVResultGenerator {
         this.threads = null;
         this.sessions = null;
         this.credentials = null;
-        this.repository = null;
+        this.cluster = null;
     }
 
     /**
@@ -458,19 +460,21 @@ abstract class AbstractTest<T> extends Benchmark implements CSVResultGenerator {
 
     protected void failOnRepositoryVersions(String... versions)
             throws RepositoryException {
-        String repositoryVersion =
-                repository.getDescriptor(Repository.REP_VERSION_DESC);
-        for (String version : versions) {
-            if (repositoryVersion.startsWith(version)) {
-                throw new RepositoryException(
-                        "Unable to run " + getClass().getName()
-                        + " on repository version " + version);
+        for (Repository repository : cluster) {
+            String repositoryVersion =
+                    repository.getDescriptor(Repository.REP_VERSION_DESC);
+            for (String version : versions) {
+                if (repositoryVersion.startsWith(version)) {
+                    throw new RepositoryException(
+                            "Unable to run " + getClass().getName()
+                            + " on repository version " + version);
+                }
             }
         }
     }
 
     protected Repository getRepository() {
-        return repository;
+        return cluster[0];
     }
 
     protected Credentials getCredentials() {
@@ -507,7 +511,7 @@ abstract class AbstractTest<T> extends Benchmark implements CSVResultGenerator {
     */
    protected Session login(Credentials credentials) {
        try {
-           Session session = repository.login(credentials);
+           Session session = cluster[0].login(credentials);
            synchronized (sessions) {
                sessions.add(session);
            }
@@ -531,14 +535,15 @@ abstract class AbstractTest<T> extends Benchmark implements CSVResultGenerator {
     }
 
     /**
-     * Returns a new writer session that will be automatically closed once
-     * all the iterations of this test have been executed.
+     * Returns a new writer session for the first repository in the cluster
+     * that will be automatically closed once all the iterations of this test
+     * have been executed.
      *
      * @return writer session
      */
     protected Session loginWriter() {
         try {
-            Session session = repository.login(credentials);
+            Session session = cluster[0].login(credentials);
             synchronized (sessions) {
                 sessions.add(session);
             }
@@ -546,6 +551,29 @@ abstract class AbstractTest<T> extends Benchmark implements CSVResultGenerator {
         } catch (RepositoryException e) {
             throw new RuntimeException(e);
         }
+    }
+
+    /**
+     * Returns a new writer session for some (random) repository in the cluster
+     * that will be automatically closed once all the iterations of this test
+     * have been executed.
+     *
+     * @return writer session
+     */
+    protected Session loginRandomClusterWriter() {
+        try {
+            Session session = randomRepository().login(credentials);
+            synchronized (sessions) {
+                sessions.add(session);
+            }
+            return session;
+        } catch (RepositoryException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private Repository randomRepository() {
+        return cluster[random.nextInt(cluster.length)];
     }
 
     /**
