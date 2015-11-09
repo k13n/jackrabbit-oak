@@ -5,7 +5,7 @@
 mongo conflicts --eval "db.dropDatabase()" &> /dev/null
 
 java \
-  -DclusterSize=3 \
+  -DclusterSize=2 \
   -Dverbose=false \
   -jar target/oak-run-1.4-SNAPSHOT.jar benchmark \
   --db conflicts \

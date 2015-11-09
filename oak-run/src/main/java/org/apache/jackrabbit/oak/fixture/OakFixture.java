@@ -71,6 +71,10 @@ public abstract class OakFixture {
 
     public abstract void tearDownCluster();
 
+    public void tearDownClusterSoftly() {
+        tearDownCluster();
+    }
+
     @Override
     public String toString() {
         return name;
@@ -187,10 +191,15 @@ public abstract class OakFixture {
             }
 
             @Override
-            public void tearDownCluster() {
+            public void tearDownClusterSoftly() {
                 for (DocumentMK kernel : kernels) {
                     kernel.dispose();
                 }
+            }
+
+            @Override
+            public void tearDownCluster() {
+                tearDownClusterSoftly();
                 if (dropDBAfterTest) {
                     try {
                         MongoConnection mongo =

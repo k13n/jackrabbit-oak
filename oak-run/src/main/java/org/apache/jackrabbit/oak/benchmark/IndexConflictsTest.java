@@ -73,7 +73,7 @@ public abstract class IndexConflictsTest extends AbstractTest<Void> {
         optimisticWaitForEventualConsistency();
     }
 
-    public static void optimisticWaitForEventualConsistency() {
+    private void optimisticWaitForEventualConsistency() {
         try {
             // wait, hoping that in the meantime changes propagate
             // to all cluster nodes
