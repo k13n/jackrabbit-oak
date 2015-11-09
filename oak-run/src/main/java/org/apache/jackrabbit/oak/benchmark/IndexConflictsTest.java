@@ -90,13 +90,15 @@ public abstract class IndexConflictsTest extends AbstractTest<Void> {
 
     @Override
     public void runTest() throws Exception {
+        long threadId = Thread.currentThread().getId();
+
         // get a session to *some* repository in the cluster
-        Session session = loginRandomClusterWriter();
+        Session session = loginRandomClusterWriter(threadId);
         Node rootNode = session.getNode("/" + ROOT_NODE_NAME);
 
         // use always the same node name per thread to avoid
         // too much garbage in the index (see OAK-2620 and OAK-1557)
-        String nodeName = "node" + Thread.currentThread().getId();
+        String nodeName = "node" + threadId;
 
         for (int i = 0; i < NODES_PER_RUN; i++) {
             try {

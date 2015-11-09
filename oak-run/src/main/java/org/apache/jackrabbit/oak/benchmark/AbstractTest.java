@@ -18,8 +18,10 @@ package org.apache.jackrabbit.oak.benchmark;
 
 import java.io.PrintStream;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -76,6 +78,8 @@ abstract class AbstractTest<T> extends Benchmark implements CSVResultGenerator {
     
     private Repository[] cluster;
 
+    private List<Repository> unconnectedClusterNodes;
+
     private Credentials credentials;
 
     private List<Session> sessions;
@@ -89,6 +93,8 @@ abstract class AbstractTest<T> extends Benchmark implements CSVResultGenerator {
     private PrintStream out;
 
     private Random random = new Random();
+
+    private Map<Long, Repository> randomClusterNodes;
 
     /**
      * <p>
@@ -165,6 +171,8 @@ abstract class AbstractTest<T> extends Benchmark implements CSVResultGenerator {
         this.credentials = credentials;
         this.sessions = new LinkedList<Session>();
         this.threads = new LinkedList<Thread>();
+        this.randomClusterNodes = new HashMap<Long, Repository>();
+        this.unconnectedClusterNodes = new LinkedList<Repository>(Arrays.asList(cluster));
 
         this.running = true;
 
@@ -400,6 +408,8 @@ abstract class AbstractTest<T> extends Benchmark implements CSVResultGenerator {
         this.sessions = null;
         this.credentials = null;
         this.cluster = null;
+        this.randomClusterNodes = null;
+        this.unconnectedClusterNodes = null;
     }
 
     /**
@@ -556,13 +566,28 @@ abstract class AbstractTest<T> extends Benchmark implements CSVResultGenerator {
     /**
      * Returns a new writer session for some (random) repository in the cluster
      * that will be automatically closed once all the iterations of this test
-     * have been executed.
+     * have been executed. If called again with the same <code>id</code> then
+     * a session to the same cluster node is opened. That is, clients get sticky
+     * connections, i.e. always to the same cluster node.
      *
      * @return writer session
      */
-    protected Session loginRandomClusterWriter() {
+    protected Session loginRandomClusterWriter(long id) {
         try {
-            Session session = randomRepository().login(credentials);
+            Repository repository;
+            synchronized (randomClusterNodes) {
+                repository = randomClusterNodes.get(id);
+                if (repository == null) {
+                    if (unconnectedClusterNodes.isEmpty()) {
+                        repository = cluster[random.nextInt(cluster.length)];
+                    } else {
+                        int rand = random.nextInt(unconnectedClusterNodes.size());
+                        repository = unconnectedClusterNodes.remove(rand);
+                    }
+                    randomClusterNodes.put(id, repository);
+                }
+            }
+            Session session = repository.login(credentials);
             synchronized (sessions) {
                 sessions.add(session);
             }
@@ -570,10 +595,6 @@ abstract class AbstractTest<T> extends Benchmark implements CSVResultGenerator {
         } catch (RepositoryException e) {
             throw new RuntimeException(e);
         }
-    }
-
-    private Repository randomRepository() {
-        return cluster[random.nextInt(cluster.length)];
     }
 
     /**
