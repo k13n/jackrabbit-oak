@@ -92,11 +92,16 @@ public abstract class IndexConflictsTest extends AbstractTest<Void> {
     public void runTest() throws Exception {
         long threadId = Thread.currentThread().getId();
 
-        AtomicInteger nodeCounter = nodeCounters.get(threadId);
-        if (nodeCounter == null) {
-            nodeCounter = new AtomicInteger();
-            nodeCounters.put(threadId, nodeCounter);
+        // obtain a node counter for this specific client (thread)
+        AtomicInteger nodeCounter;
+        synchronized (nodeCounters) {
+            nodeCounter = nodeCounters.get(threadId);
+            if (nodeCounter == null) {
+                nodeCounter = new AtomicInteger();
+                nodeCounters.put(threadId, nodeCounter);
+            }
         }
+
         // get a session to *some* repository in the cluster
         Session session = loginRandomClusterWriter(threadId);
         Node rootNode = session.getNode("/" + ROOT_NODE_NAME);
