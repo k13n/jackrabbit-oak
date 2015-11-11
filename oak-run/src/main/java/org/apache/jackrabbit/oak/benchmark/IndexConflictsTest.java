@@ -45,7 +45,7 @@ public abstract class IndexConflictsTest extends AbstractTest<Void> {
     private static final int CLUSTER_SIZE = Integer.getInteger("clusterSize", 1);
     private static final boolean VERBOSE = Boolean.getBoolean("verbose");
 
-    private AtomicInteger nodeCounter;
+    private Map<Long, AtomicInteger> nodeCounters;
     private Map<Class<? extends Exception>, Integer> errorCounter;
 
     @Override
@@ -55,7 +55,7 @@ public abstract class IndexConflictsTest extends AbstractTest<Void> {
 
     @Override
     public void beforeSuite() throws RepositoryException {
-        nodeCounter = new AtomicInteger();
+        nodeCounters = new HashMap<Long, AtomicInteger>();
         errorCounter = new HashMap<Class<? extends Exception>, Integer>();
 
         // create a new root node under which all children are organized
@@ -92,6 +92,11 @@ public abstract class IndexConflictsTest extends AbstractTest<Void> {
     public void runTest() throws Exception {
         long threadId = Thread.currentThread().getId();
 
+        AtomicInteger nodeCounter = nodeCounters.get(threadId);
+        if (nodeCounter == null) {
+            nodeCounter = new AtomicInteger();
+            nodeCounters.put(threadId, nodeCounter);
+        }
         // get a session to *some* repository in the cluster
         Session session = loginRandomClusterWriter(threadId);
         Node rootNode = session.getNode("/" + ROOT_NODE_NAME);
@@ -113,7 +118,10 @@ public abstract class IndexConflictsTest extends AbstractTest<Void> {
                 session.save();
             } catch (RepositoryException e) {
                 synchronized (errorCounter) {
-                    Integer counter = errorCounter.getOrDefault(e.getClass(), 0);
+                    Integer counter = errorCounter.get(e.getClass());
+                    if (counter == null) {
+                        counter = 0;
+                    }
                     errorCounter.put(e.getClass(), counter + 1);
                 }
                 if (VERBOSE) {
@@ -132,8 +140,12 @@ public abstract class IndexConflictsTest extends AbstractTest<Void> {
 
     @Override
     protected void afterSuite() throws Exception {
+        int numNodes = 0;
+        for (AtomicInteger i : nodeCounters.values()) {
+            numNodes += i.get();
+        }
         System.out.println("Cluster Size: " + CLUSTER_SIZE);
-        System.out.println("Nodes created: " + nodeCounter.get());
+        System.out.println("Nodes created: " + numNodes + " " + nodeCounters);
         System.out.println("Conflicts: " + Commit.conflictCounter.get());
         if (!errorCounter.isEmpty()) {
             System.out.println("Exceptions thrown: ");
