@@ -37,6 +37,8 @@ import org.apache.jackrabbit.oak.commons.PathUtils;
 import org.apache.jackrabbit.oak.plugins.index.IndexConstants;
 import org.apache.jackrabbit.oak.plugins.index.property.strategy.ContentMirrorStoreStrategy;
 import org.apache.jackrabbit.oak.plugins.index.property.strategy.IndexStoreStrategy;
+import org.apache.jackrabbit.oak.plugins.index.property.strategy.IndexStoreStrategyProvider;
+import org.apache.jackrabbit.oak.plugins.index.property.strategy.SemiFlatStoreStrategy;
 import org.apache.jackrabbit.oak.plugins.index.property.strategy.UniqueEntryStoreStrategy;
 import org.apache.jackrabbit.oak.spi.query.Filter;
 import org.apache.jackrabbit.oak.spi.state.ChildNodeEntry;
@@ -69,14 +71,6 @@ public class PropertyIndexLookup {
      * The maximum cost when the index can be used.
      */
     static final int MAX_COST = 100;
-
-    /** Index storage strategy */
-    private static final IndexStoreStrategy MIRROR =
-            new ContentMirrorStoreStrategy();
-
-    /** Index storage strategy */
-    private static final IndexStoreStrategy UNIQUE =
-            new UniqueEntryStoreStrategy();
 
     private final NodeState root;
 
@@ -118,10 +112,8 @@ public class PropertyIndexLookup {
     }
 
     IndexStoreStrategy getStrategy(NodeState indexMeta) {
-        if (indexMeta.getBoolean(IndexConstants.UNIQUE_PROPERTY_NAME)) {
-            return UNIQUE;
-        }
-        return MIRROR;
+        boolean uniqueIndex = indexMeta.getBoolean(IndexConstants.UNIQUE_PROPERTY_NAME);
+        return IndexStoreStrategyProvider.getStrategy(uniqueIndex);
     }
 
     public double getCost(Filter filter, String propertyName, PropertyValue value) {

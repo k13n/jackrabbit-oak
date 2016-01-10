@@ -31,9 +31,8 @@ import java.util.Set;
 import org.apache.jackrabbit.oak.api.PropertyValue;
 import org.apache.jackrabbit.oak.commons.PathUtils;
 import org.apache.jackrabbit.oak.plugins.index.PathFilter;
-import org.apache.jackrabbit.oak.plugins.index.property.strategy.ContentMirrorStoreStrategy;
 import org.apache.jackrabbit.oak.plugins.index.property.strategy.IndexStoreStrategy;
-import org.apache.jackrabbit.oak.plugins.index.property.strategy.UniqueEntryStoreStrategy;
+import org.apache.jackrabbit.oak.plugins.index.property.strategy.IndexStoreStrategyProvider;
 import org.apache.jackrabbit.oak.query.QueryEngineSettings;
 import org.apache.jackrabbit.oak.query.ast.ComparisonImpl;
 import org.apache.jackrabbit.oak.query.ast.ConstraintImpl;
@@ -63,14 +62,6 @@ public class PropertyIndexPlan {
      * The maximum cost when the index can be used.
      */
     static final int MAX_COST = 100;
-
-    /** Index storage strategy */
-    private static final IndexStoreStrategy MIRROR =
-            new ContentMirrorStoreStrategy();
-
-    /** Index storage strategy */
-    private static final IndexStoreStrategy UNIQUE =
-            new UniqueEntryStoreStrategy();
 
     private final NodeState root;
 
@@ -103,11 +94,8 @@ public class PropertyIndexPlan {
         this.properties = newHashSet(definition.getNames(PROPERTY_NAMES));
         pathFilter = PathFilter.from(definition.builder());
 
-        if (definition.getBoolean(UNIQUE_PROPERTY_NAME)) {
-            this.strategy = UNIQUE;
-        } else {
-            this.strategy = MIRROR;
-        }
+        boolean uniqueIndex = definition.getBoolean(UNIQUE_PROPERTY_NAME);
+        this.strategy = IndexStoreStrategyProvider.getStrategy(uniqueIndex);
 
         this.filter = filter;
 

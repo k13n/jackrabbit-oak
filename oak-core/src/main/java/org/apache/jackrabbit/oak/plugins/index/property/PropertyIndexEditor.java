@@ -41,9 +41,8 @@ import org.apache.jackrabbit.oak.plugins.index.IndexConstants;
 import org.apache.jackrabbit.oak.plugins.index.IndexEditor;
 import org.apache.jackrabbit.oak.plugins.index.IndexUpdateCallback;
 import org.apache.jackrabbit.oak.plugins.index.PathFilter;
-import org.apache.jackrabbit.oak.plugins.index.property.strategy.ContentMirrorStoreStrategy;
 import org.apache.jackrabbit.oak.plugins.index.property.strategy.IndexStoreStrategy;
-import org.apache.jackrabbit.oak.plugins.index.property.strategy.UniqueEntryStoreStrategy;
+import org.apache.jackrabbit.oak.plugins.index.property.strategy.IndexStoreStrategyProvider;
 import org.apache.jackrabbit.oak.plugins.nodetype.TypePredicate;
 import org.apache.jackrabbit.oak.spi.commit.Editor;
 import org.apache.jackrabbit.oak.spi.query.PropertyValues;
@@ -59,14 +58,6 @@ import com.google.common.base.Predicate;
  * @see PropertyIndexLookup
  */
 class PropertyIndexEditor implements IndexEditor {
-
-    /** Index storage strategy */
-    private static final IndexStoreStrategy MIRROR =
-            new ContentMirrorStoreStrategy();
-
-    /** Index storage strategy */
-    private static final IndexStoreStrategy UNIQUE =
-            new UniqueEntryStoreStrategy();
 
     /** Parent editor, or {@code null} if this is the root editor. */
     private final PropertyIndexEditor parent;
@@ -221,10 +212,6 @@ class PropertyIndexEditor implements IndexEditor {
         return keys;
     }
 
-    IndexStoreStrategy getStrategy(boolean unique) {
-        return unique ? UNIQUE : MIRROR;
-    }
-
     @Override
     public void enter(NodeState before, NodeState after) {
         // disables property name checks
@@ -292,8 +279,9 @@ class PropertyIndexEditor implements IndexEditor {
                     keysToCheckForUniqueness.addAll(
                             getExistingKeys(afterKeys, index));
                 }
-                getStrategy(uniqueIndex).update(
-                        index, getPath(), properties, definition, beforeKeys, afterKeys);
+                IndexStoreStrategy store = IndexStoreStrategyProvider.getStrategy(uniqueIndex);
+                store.update(index, getPath(), properties, definition,
+                        beforeKeys, afterKeys);
             }
         }
 
@@ -332,7 +320,7 @@ class PropertyIndexEditor implements IndexEditor {
      */
     private Set<String> getExistingKeys(Set<String> keys, NodeBuilder index) {
         Set<String> existing = null;
-        IndexStoreStrategy s = getStrategy(true);
+        IndexStoreStrategy s = IndexStoreStrategyProvider.getStrategy(true);
         for (String key : keys) {
             if (s.exists(index, key)) {
                 if (existing == null) {
@@ -355,7 +343,7 @@ class PropertyIndexEditor implements IndexEditor {
      * @return the first duplicate, or null if none was found
      */
     private String getFirstDuplicate(Set<String> keys, NodeState indexMeta) {
-        IndexStoreStrategy s = getStrategy(true);
+        IndexStoreStrategy s = IndexStoreStrategyProvider.getStrategy(true);
         for (String key : keys) {
             if (s.count(root, indexMeta, singleton(key), 2) > 1) {
                 return key;
