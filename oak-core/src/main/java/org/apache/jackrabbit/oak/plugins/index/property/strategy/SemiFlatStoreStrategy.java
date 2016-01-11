@@ -1,7 +1,6 @@
 package org.apache.jackrabbit.oak.plugins.index.property.strategy;
 
 import static com.google.common.base.Preconditions.checkState;
-import static java.lang.String.format;
 import static org.apache.jackrabbit.oak.commons.PathUtils.ROOT_PATH;
 import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.INDEX_CONTENT_NODE_NAME;
 
@@ -22,18 +21,19 @@ import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.google.common.base.Joiner;
 import com.google.common.collect.AbstractIterator;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Queues;
 import com.google.common.collect.Sets;
 
 public class SemiFlatStoreStrategy implements IndexStoreStrategy {
-    @SuppressWarnings("unsued")
-    private static final Logger LOG = LoggerFactory.getLogger(SemiFlatStoreStrategyTest.class);
+    private static final Logger LOG = LoggerFactory.getLogger(SemiFlatStoreStrategy.class);
     private static final String MATCH_PREFIX = "match_";
     private final int DEPTH;
 
     public SemiFlatStoreStrategy(int depth) {
+        LOG.debug("create SemiFlatStoreStrategy with depth: {}", depth);
         DEPTH = depth;
     }
 
@@ -52,6 +52,7 @@ public class SemiFlatStoreStrategy implements IndexStoreStrategy {
     }
 
     private void insert(NodeBuilder index, String indexedValue, String path) {
+        LOG.debug("index for value \"{}\" the path \"{}\"", indexedValue, path);
         path = flattenPath(path);
         NodeBuilder builder = index.child(indexedValue);
 
@@ -150,6 +151,7 @@ public class SemiFlatStoreStrategy implements IndexStoreStrategy {
     }
 
     private void remove(NodeBuilder index, String indexedValue, String path) {
+        LOG.debug("remove for indexed value \"{}\" the path \"{}\"", indexedValue, path);
         path = flattenPath(path);
         NodeBuilder builder = index.getChildNode(indexedValue);
 
@@ -218,6 +220,11 @@ public class SemiFlatStoreStrategy implements IndexStoreStrategy {
     @Override
     public Iterable<String> query(final Filter filter, String indexName,
             final NodeState indexMeta, final Iterable<String> values) {
+        if (LOG.isDebugEnabled()) {
+            String allValues = (values == null) ? null : Joiner.on(", ").join(values);
+            LOG.debug("query index \"{}\"; values: \"{}\"; path filter \"{}\"; query: {}",
+                    indexName, allValues, filter.getPath(), filter.getQueryStatement());
+        }
         return new Iterable<String>() {
             @Override public Iterator<String> iterator() {
                 NodeState index = indexMeta.getChildNode(INDEX_CONTENT_NODE_NAME);
