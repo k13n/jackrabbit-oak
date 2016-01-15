@@ -2,7 +2,9 @@ package org.apache.jackrabbit.oak.plugins.index.property.strategy;
 
 import static com.google.common.base.Preconditions.checkState;
 import static org.apache.jackrabbit.oak.commons.PathUtils.ROOT_PATH;
+import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.ENTRY_COUNT_PROPERTY_NAME;
 import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.INDEX_CONTENT_NODE_NAME;
+import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.KEY_COUNT_PROPERTY_NAME;
 import static org.apache.jackrabbit.oak.plugins.index.property.strategy.ContentMirrorStoreStrategy.TRAVERSING_WARN;
 
 import java.util.Deque;
@@ -13,13 +15,18 @@ import java.util.Set;
 import javax.annotation.Nullable;
 
 import org.apache.jackrabbit.oak.api.PropertyState;
+import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.commons.PathUtils;
+import org.apache.jackrabbit.oak.plugins.index.counter.NodeCounterEditor;
+import org.apache.jackrabbit.oak.plugins.index.counter.jmx.NodeCounter;
+import org.apache.jackrabbit.oak.plugins.index.property.strategy.ContentMirrorStoreStrategy.NodeVisitor;
 import org.apache.jackrabbit.oak.plugins.memory.MemoryChildNodeEntry;
 import org.apache.jackrabbit.oak.query.FilterIterators;
 import org.apache.jackrabbit.oak.spi.query.Filter;
 import org.apache.jackrabbit.oak.spi.state.ChildNodeEntry;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
+import org.apache.jackrabbit.oak.util.ApproximateCounter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -57,6 +64,9 @@ public class SemiFlatStoreStrategy implements IndexStoreStrategy {
         LOG.debug("index for value \"{}\" the path \"{}\"", indexedValue, path);
         path = flattenPath(path);
         NodeBuilder builder = index.child(indexedValue);
+
+        ApproximateCounter.adjustCountSync(index, 1);
+        ApproximateCounter.adjustCountSync(builder, 1);
 
         String lastName = ROOT_PATH;
         Iterator<String> pathElements = PathUtils.elements(path).iterator();
@@ -156,6 +166,9 @@ public class SemiFlatStoreStrategy implements IndexStoreStrategy {
         LOG.debug("remove for indexed value \"{}\" the path \"{}\"", indexedValue, path);
         path = flattenPath(path);
         NodeBuilder builder = index.getChildNode(indexedValue);
+
+        ApproximateCounter.adjustCountSync(index, -1);
+        ApproximateCounter.adjustCountSync(builder, -1);
 
         // Collect all builders along the given path
         Deque<NodeBuilder> builders = Queues.newArrayDeque();
@@ -346,15 +359,210 @@ public class SemiFlatStoreStrategy implements IndexStoreStrategy {
     @Override
     public long count(NodeState root, NodeState indexMeta, Set<String> values,
             int max) {
-        // TODO: Compute an accurate count estimation
-        return 1;
+        return new CountEstimator(null, root, indexMeta, values, max).estimate();
     }
 
     @Override
     public long count(Filter filter, NodeState root, NodeState indexMeta,
             Set<String> values, int max) {
-        // TODO: Compute an accurate count estimation
-        return 1;
+        return new CountEstimator(filter, root, indexMeta, values, max).estimate();
+    }
+
+    private class CountEstimator {
+        private final Filter filter;
+        private final NodeState root;
+        private final NodeState index;
+        private final NodeState indexMeta;
+        private final Set<String> values;
+        private final int max;
+        private long count;
+
+        public CountEstimator(Filter filter, NodeState root, NodeState indexMeta,
+            Set<String> values, int max) {
+            this.filter = filter;
+            this.root = root;
+            this.indexMeta = indexMeta;
+            this.values = values;
+            this.max = max;
+            index = indexMeta.getChildNode(INDEX_CONTENT_NODE_NAME);
+        }
+
+        public long estimate() {
+            count = -1;
+            if (values == null) {
+                countPropertyIsNotNullQuery();
+            } else {
+                countPropertyWithSpecificValueQuery();
+            }
+            applyFilter();
+            return count;
+        }
+
+        // property != NULL
+        private void countPropertyIsNotNullQuery() {
+            PropertyState ec = indexMeta.getProperty(ENTRY_COUNT_PROPERTY_NAME);
+            if (ec != null) {
+                count = ec.getValue(Type.LONG);
+            } else {
+                count = ApproximateCounter.getCountSync(index);
+            }
+
+            if (count < 0) {
+                CountingNodeVisitor visitor = new CountingNodeVisitor(max);
+                visitor.visit(index);
+                count = visitor.getEstimatedCount();
+                if (count >= max) {
+                    // "is not null" queries typically read more data
+                    count *= 10;
+                }
+            }
+        }
+
+        // property = x or property in (x,y,z)
+        private void countPropertyWithSpecificValueQuery() {
+            int nrValues = values.size();
+            if (nrValues == 0) {
+                count = 0;
+                return;
+            }
+
+            PropertyState ec = indexMeta.getProperty(ENTRY_COUNT_PROPERTY_NAME);
+            if (ec != null) {
+                count = ec.getValue(Type.LONG);
+                if (count >= 0) {
+                    // assume 10*NodeCounterEditor.DEFAULT_RESOLUTION entries per key, so that this index is used
+                    // instead of traversal, but not instead of a regular property index
+                    long keyCount = count / (10 * NodeCounterEditor.DEFAULT_RESOLUTION);
+                    ec = indexMeta.getProperty(KEY_COUNT_PROPERTY_NAME);
+                    if (ec != null) {
+                        keyCount = ec.getValue(Type.LONG);
+                    }
+                    // cast to double to avoid overflow
+                    // (entryCount could be Long.MAX_VALUE)
+                    // the cost is not multiplied by the size,
+                    // otherwise the traversing index might be used
+                    keyCount = Math.max(1, keyCount);
+                    count = (long) ((double) count / keyCount) + nrValues;
+                }
+            } else {
+                tryApproximateCount();
+            }
+
+            if (count < 0) {
+                count = 0;
+                int max = Math.max(10, this.max / nrValues);
+                int i = 0;
+                for (String p : values) {
+                    if (count > max && i > 3) {
+                        // the total count is extrapolated from the the number
+                        // of values counted so far to the total number of values
+                        count = count * nrValues / i;
+                        break;
+                    }
+                    NodeState s = index.getChildNode(p);
+                    if (s.exists()) {
+                        CountingNodeVisitor v = new CountingNodeVisitor(max);
+                        v.visit(s);
+                        count += v.getEstimatedCount();
+                    }
+                    i++;
+                }
+            }
+        }
+
+        private void tryApproximateCount() {
+            long approxMax = 0;
+            long approxCount = ApproximateCounter.getCountSync(index);
+            if (approxCount == -1) {
+                return;
+            }
+
+            for (String value : values) {
+                NodeState s = index.getChildNode(value);
+                if (s.exists()) {
+                    long a = ApproximateCounter.getCountSync(s);
+                    if (a >= 0) {
+                        approxMax += a;
+                    } else if (approxMax > 0) {
+                        // in absence of approx count for a key we should be conservative
+                        approxMax += 10 * NodeCounterEditor.DEFAULT_RESOLUTION;
+                    }
+                }
+            }
+            if (approxMax > 0) {
+                count = approxMax;
+            }
+        }
+
+
+        private void applyFilter() {
+            if (filter == null || !filter.getPathRestriction().equals(Filter.PathRestriction.ALL_CHILDREN)) {
+                return;
+            }
+
+            // scale cost according to path restriction
+            String filterRootPath = filter.getPath();
+            long totalNodesCount = NodeCounter.getEstimatedNodeCount(root, "/", true);
+            if (totalNodesCount != -1) {
+                long filterPathCount = NodeCounter.getEstimatedNodeCount(root, filterRootPath, true);
+                if (filterPathCount != -1) {
+                    count = (long) ((double) count / totalNodesCount * filterPathCount);
+                }
+            }
+        }
+    }
+
+
+    private class CountingNodeVisitor implements NodeVisitor {
+        final int maxCount;
+        int count;
+        int depth;
+        long depthTotal;
+
+        public CountingNodeVisitor(int maxCount) {
+            this.maxCount = maxCount;
+        }
+
+        @Override
+        public void visit(NodeState state) {
+            int nrMatches = getNumberOfMatches(state);
+            if (nrMatches > 0) {
+                count += nrMatches;
+                depthTotal += (nrMatches * depth);
+            }
+            if (count < maxCount) {
+                depth += DEPTH;
+                for (ChildNodeEntry entry : state.getChildNodeEntries()) {
+                    if (count >= maxCount) {
+                        break;
+                    }
+                    visit(entry.getNodeState());
+                }
+                depth -= DEPTH;
+            }
+        }
+
+        private int getNumberOfMatches(NodeState state) {
+            int cnt = 0;
+            for (PropertyState p : state.getProperties()) {
+                if (p.getName().startsWith(MATCH_PREFIX)) {
+                    cnt++;
+                }
+            }
+            return cnt;
+        }
+
+        public int getEstimatedCount() {
+            if (count < maxCount) {
+                return count;
+            }
+            double averageDepth = (int) (depthTotal / count);
+            // the number of estimated matches is higher
+            // the higher the average depth of the first hits
+            long estimatedNodes = (long) (count * Math.pow(1.1, averageDepth));
+            estimatedNodes = Math.min(estimatedNodes, Integer.MAX_VALUE);
+            return Math.max(count, (int) estimatedNodes);
+        }
     }
 
     /**

@@ -178,7 +178,7 @@ public class PropertyIndexTest {
 
         cost = lookup.getCost(f, "foo", PropertyValues.newString(
                 Arrays.asList("x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x0")));
-        assertTrue("cost: " + cost, cost >= 81.5 && cost <= 82.5);
+        assertTrue("cost: " + cost, cost >= 81.5 && cost <= 100.5);
 
         cost = lookup.getCost(f, "foo", null);
         assertTrue("cost: " + cost, cost >= MANY);
