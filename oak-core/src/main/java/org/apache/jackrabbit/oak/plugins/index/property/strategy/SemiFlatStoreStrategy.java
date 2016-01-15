@@ -3,6 +3,7 @@ package org.apache.jackrabbit.oak.plugins.index.property.strategy;
 import static com.google.common.base.Preconditions.checkState;
 import static org.apache.jackrabbit.oak.commons.PathUtils.ROOT_PATH;
 import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.INDEX_CONTENT_NODE_NAME;
+import static org.apache.jackrabbit.oak.plugins.index.property.strategy.ContentMirrorStoreStrategy.TRAVERSING_WARN;
 
 import java.util.Deque;
 import java.util.Iterator;
@@ -14,6 +15,7 @@ import javax.annotation.Nullable;
 import org.apache.jackrabbit.oak.api.PropertyState;
 import org.apache.jackrabbit.oak.commons.PathUtils;
 import org.apache.jackrabbit.oak.plugins.memory.MemoryChildNodeEntry;
+import org.apache.jackrabbit.oak.query.FilterIterators;
 import org.apache.jackrabbit.oak.spi.query.Filter;
 import org.apache.jackrabbit.oak.spi.state.ChildNodeEntry;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
@@ -218,7 +220,7 @@ public class SemiFlatStoreStrategy implements IndexStoreStrategy {
     }
 
     @Override
-    public Iterable<String> query(final Filter filter, String indexName,
+    public Iterable<String> query(final Filter filter, final String indexName,
             final NodeState indexMeta, final Iterable<String> values) {
         if (LOG.isDebugEnabled()) {
             String allValues = (values == null) ? null : Joiner.on(", ").join(values);
@@ -241,7 +243,7 @@ public class SemiFlatStoreStrategy implements IndexStoreStrategy {
                         }
                     }
                 }
-                return new QueryIndexIterator(roots, filter);
+                return new QueryIndexIterator(roots, filter, indexName);
             }
         };
     }
@@ -252,8 +254,14 @@ public class SemiFlatStoreStrategy implements IndexStoreStrategy {
         private Queue<String> bufferedMatches;
         private Set<String> resultPaths;
         private String filterPath;
+        private int nrMatchesFound;
+        private int nrNodesRead;
+        private final Filter filter;
+        private final String indexName;
 
-        public QueryIndexIterator(Deque<ChildNodeEntry> roots, Filter filter) {
+        public QueryIndexIterator(Deque<ChildNodeEntry> roots, Filter filter, String indexName) {
+            this.indexName = indexName;
+            this.filter = filter;
             nodes = roots;
             filterPath = flattenPath(filter.getPath());
             paths = Queues.newArrayDeque();
@@ -311,6 +319,7 @@ public class SemiFlatStoreStrategy implements IndexStoreStrategy {
                     for (ChildNodeEntry childEntry : node.getChildNodeEntries()) {
                         nodes.addLast(childEntry);
                         paths.addLast(currentPath);
+                        nrNodesRead++;
                     }
                 }
             }
@@ -320,6 +329,11 @@ public class SemiFlatStoreStrategy implements IndexStoreStrategy {
             if (isAncestorOrSelf(filterPath, path) && !resultPaths.contains(path)) {
                 bufferedMatches.offer(path);
                 resultPaths.add(path);
+                if ((++nrMatchesFound) % TRAVERSING_WARN == 0) {
+                    FilterIterators.checkReadLimit(nrMatchesFound, filter.getQueryEngineSettings());
+                    LOG.warn("Traversed {} nodes ({} index entries) using index {} with filter {}",
+                            nrMatchesFound, nrNodesRead, indexName, filter);
+                }
             }
         }
 
