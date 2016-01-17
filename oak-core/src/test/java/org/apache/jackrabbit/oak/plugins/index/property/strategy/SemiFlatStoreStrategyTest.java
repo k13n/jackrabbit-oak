@@ -164,20 +164,19 @@ public class SemiFlatStoreStrategyTest {
         store.update(index, "/a/b/c/d", null, null, EMPTY, VALUES);
 
         FilterImpl filter = new FilterImpl();
-        filter.setPath("/a/b/c");
+        filter.restrictPath("/a/b/c", Filter.PathRestriction.ALL_CHILDREN);
         matchIterator = store.query(filter, "", indexMeta.getNodeState(), null);
         checkResultContainsPaths(matchIterator, "a/b/c/d");
 
         filter = new FilterImpl();
-        filter.setPath("/a/b");
+        filter.restrictPath("/a/b", Filter.PathRestriction.ALL_CHILDREN);
         matchIterator = store.query(filter, "", indexMeta.getNodeState(), null);
         checkResultContainsPaths(matchIterator, "a/b", "a/b/c/d");
-        filter = new FilterImpl();
 
-        filter.setPath("/");
+        filter = new FilterImpl();
+        filter.restrictPath("/", Filter.PathRestriction.ALL_CHILDREN);
         matchIterator = store.query(filter, "", indexMeta.getNodeState(), null);
         checkResultContainsPaths(matchIterator, "", "a/b", "a/b/c/d");
-        filter = new FilterImpl();
     }
 
     private void checkResultContainsPaths(Iterable<String> matchIterator, String... paths) {

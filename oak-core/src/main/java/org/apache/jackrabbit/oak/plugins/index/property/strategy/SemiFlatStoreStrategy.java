@@ -276,13 +276,21 @@ public class SemiFlatStoreStrategy implements IndexStoreStrategy {
             this.indexName = indexName;
             this.filter = filter;
             nodes = roots;
-            filterPath = flattenPath(filter.getPath());
             paths = Queues.newArrayDeque();
             bufferedMatches = Queues.newArrayDeque();
             resultPaths = Sets.newHashSet();
+            initFilterPath();
             checkIfRootMatches();
             for (int i = 0; i < nodes.size(); ++i) {
                 paths.add(ROOT_PATH);
+            }
+        }
+
+        private void initFilterPath() {
+            if (filter.getPathRestriction().equals(Filter.PathRestriction.ALL_CHILDREN)) {
+                filterPath = flattenPath(filter.getPath());
+            } else {
+                filterPath = ROOT_PATH;
             }
         }
 
@@ -502,7 +510,7 @@ public class SemiFlatStoreStrategy implements IndexStoreStrategy {
 
             // scale cost according to path restriction
             String filterRootPath = filter.getPath();
-            long totalNodesCount = NodeCounter.getEstimatedNodeCount(root, "/", true);
+            long totalNodesCount = NodeCounter.getEstimatedNodeCount(root, ROOT_PATH, true);
             if (totalNodesCount != -1) {
                 long filterPathCount = NodeCounter.getEstimatedNodeCount(root, filterRootPath, true);
                 if (filterPathCount != -1) {
