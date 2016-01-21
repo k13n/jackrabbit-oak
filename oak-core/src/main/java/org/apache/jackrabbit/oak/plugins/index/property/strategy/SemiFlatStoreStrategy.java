@@ -53,15 +53,16 @@ public class SemiFlatStoreStrategy implements IndexStoreStrategy {
             @Nullable final NodeBuilder indexMeta,
             Set<String> beforeKeys, Set<String> afterKeys) {
         for (String key : beforeKeys) {
-            remove(index, key, path);
+            remove(index, key, path, indexName);
         }
         for (String key : afterKeys) {
-            insert(index, key, path);
+            insert(index, key, path, indexName);
         }
     }
 
-    private void insert(NodeBuilder index, String indexedValue, String path) {
-        LOG.debug("index for value \"{}\" the path \"{}\"", indexedValue, path);
+    private void insert(NodeBuilder index, String indexedValue, String path, String indexName) {
+        LOG.debug("insert into \"{}\" under value \"{}\" the path \"{}\"",
+                indexName, indexedValue, path);
         path = flattenPath(path);
         NodeBuilder builder = index.child(indexedValue);
 
@@ -162,8 +163,10 @@ public class SemiFlatStoreStrategy implements IndexStoreStrategy {
         }
     }
 
-    private void remove(NodeBuilder index, String indexedValue, String path) {
-        LOG.debug("remove for indexed value \"{}\" the path \"{}\"", indexedValue, path);
+    private void remove(NodeBuilder index, String indexedValue, String path, String indexName) {
+        LOG.debug("remove from index \"{}\" under value \"{}\" the path \"{}\"",
+                indexName, indexedValue, path);
+
         path = flattenPath(path);
         NodeBuilder builder = index.getChildNode(indexedValue);
 
@@ -403,6 +406,15 @@ public class SemiFlatStoreStrategy implements IndexStoreStrategy {
                 countPropertyWithSpecificValueQuery();
             }
             applyFilter();
+
+            if (LOG.isDebugEnabled()) {
+                String allValues = (values == null) ? null : Joiner.on(", ").join(values);
+                String filterPath = (filter == null) ? null : filter.getPath();
+                String query = (filter == null) ? null : filter.getQueryStatement();
+                LOG.debug("count is {} for values: \"{}\"; max: \"{}\"; path filter \"{}\"; query: {}",
+                        count, allValues, max, filterPath, query);
+            }
+
             return count;
         }
 
