@@ -16,7 +16,9 @@
  */
 package org.apache.jackrabbit.oak.plugins.index.lucene;
 
+import org.apache.jackrabbit.oak.api.PropertyState;
 import org.apache.lucene.analysis.Analyzer;
+import org.apache.lucene.analysis.standard.StandardAnalyzer;
 import org.apache.lucene.analysis.util.AbstractAnalysisFactory;
 import org.apache.lucene.util.Version;
 
@@ -242,6 +244,11 @@ public interface LuceneIndexConstants {
     String PROP_USE_IN_SUGGEST = "useInSuggest";
 
     /**
+     * subnode holding configuration for suggestions
+     */
+    String SUGGESTION_CONFIG = "suggestion";
+
+    /**
      * update frequency of the suggester in minutes
      */
     String SUGGEST_UPDATE_FREQUENCY_MINUTES = "suggestUpdateFrequencyMinutes";
@@ -270,6 +277,12 @@ public interface LuceneIndexConstants {
     String INDEX_NODE_NAME = "indexNodeName";
 
     /**
+     * Property definition name to indicate indexing node name
+     * Its value should match {@link FieldNames#NODE_NAME}
+     */
+    String PROPDEF_PROP_NODE_NAME = ":nodeName";
+
+    /**
      * Boolean property indicating that Lucene directory content
      * should be saved as part of NodeState itself as a multi value property
      * to allow faster reads (OAK-2809)
@@ -281,6 +294,37 @@ public interface LuceneIndexConstants {
      * definition is defined is not known to IndexEditor. To make use of CopyOnWrite
      * feature its required to know the indexPath to optimize the lookup and read of
      * existing index files
+     *
+     * @deprecated With OAK-4152 no need to explicitly define indexPath property
      */
+    @Deprecated
     String INDEX_PATH = "indexPath";
+
+    /**
+     * Optional subnode holding configuration for facets.
+     */
+    String FACETS = "facets";
+
+    /**
+     * Optional property to set the suggest field to be analyzed and therefore allow more fine
+     * grained and flexible suggestions.
+     */
+    String SUGGEST_ANALYZED = "suggestAnalyzed";
+
+    /**
+     * Optional (index definition) property indicating whether facets should be ACL checked.
+     * Default is true
+     */
+    String PROP_SECURE_FACETS = "secure";
+
+    /**
+     * Optional (property definition) property indicating whether facets should be created
+     * for this property
+     */
+    String PROP_FACETS = "facets";
+
+    /**
+     * Boolean property indicate that property should not be included in aggregation
+     */
+    String PROP_EXCLUDE_FROM_AGGREGATE = "excludeFromAggregation";
 }

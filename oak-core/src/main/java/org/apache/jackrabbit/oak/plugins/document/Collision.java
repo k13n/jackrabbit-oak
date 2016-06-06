@@ -16,13 +16,18 @@
  */
 package org.apache.jackrabbit.oak.plugins.document;
 
+import java.util.Map;
+
 import javax.annotation.Nonnull;
 
+import org.apache.jackrabbit.oak.plugins.document.UpdateOp.Key;
+import org.apache.jackrabbit.oak.plugins.document.UpdateOp.Operation;
 import org.apache.jackrabbit.oak.plugins.document.util.Utils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import static com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.jackrabbit.oak.plugins.document.util.Utils.isPropertyName;
 
 /**
  * A <code>Collision</code> happens when a commit modifies a node, which was
@@ -46,18 +51,15 @@ class Collision {
     private final Revision theirRev;
     private final UpdateOp ourOp;
     private final Revision ourRev;
-    private final RevisionContext context;
 
     Collision(@Nonnull NodeDocument document,
               @Nonnull Revision theirRev,
               @Nonnull UpdateOp ourOp,
-              @Nonnull Revision ourRev,
-              @Nonnull RevisionContext context) {
+              @Nonnull Revision ourRev) {
         this.document = checkNotNull(document);
         this.theirRev = checkNotNull(theirRev);
         this.ourOp = checkNotNull(ourOp);
         this.ourRev = checkNotNull(ourRev);
-        this.context = checkNotNull(context);
     }
 
     /**
@@ -68,6 +70,8 @@ class Collision {
      * @param store the document store.
      * @return the revision that was marked. Either our or their.
      * @throws DocumentStoreException if the mark operation fails.
+     * @throws IllegalStateException if neither their nor our revision can be
+     *              marked because both are already committed.
      */
     @Nonnull
     Revision mark(DocumentStore store) throws DocumentStoreException {
@@ -78,7 +82,7 @@ class Collision {
         // their commit wins, we have to mark ourRev
         NodeDocument newDoc = Collection.NODES.newDocument(store);
         document.deepCopy(newDoc);
-        UpdateUtils.applyChanges(newDoc, ourOp, context.getRevisionComparator());
+        UpdateUtils.applyChanges(newDoc, ourOp);
         if (!markCommitRoot(newDoc, ourRev, theirRev, store)) {
             throw new IllegalStateException("Unable to annotate our revision "
                     + "with collision marker. Our revision: " + ourRev
@@ -86,6 +90,38 @@ class Collision {
         }
         return ourRev;
     }
+
+    /**
+     * Returns {@code true} if this is a conflicting collision, {@code false}
+     * otherwise.
+     *
+     * @return {@code true} if this is a conflicting collision, {@code false}
+     *              otherwise.
+     * @throws DocumentStoreException
+     */
+    boolean isConflicting() throws DocumentStoreException {
+        // did their revision create or delete the node?
+        if (document.getDeleted().containsKey(theirRev)) {
+            return true;
+        }
+
+        for (Map.Entry<Key, Operation> entry : ourOp.getChanges().entrySet()) {
+            String name = entry.getKey().getName();
+            if (NodeDocument.isDeletedEntry(name)) {
+                // always conflicts because existence changed
+                return true;
+            }
+            if (isPropertyName(name)) {
+                if (document.getValueMap(name).containsKey(theirRev)) {
+                    // concurrent change on the property
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    //--------------------------< internal >------------------------------------
 
     /**
      * Marks the commit root of the change to the given <code>document</code> in
@@ -149,6 +185,18 @@ class Collision {
             // commit state changed meanwhile
             // -> assume revision is now committed
             return false;
+        } else {
+            // check again if revision is still not committed
+            // See OAK-3882
+            if (commitRoot.isCommitted(revision)) {
+                // meanwhile the change was committed and
+                // already moved to a previous document
+                // -> remove collision marker again
+                UpdateOp revert = new UpdateOp(op.getId(), false);
+                NodeDocument.removeCollision(revert, revision);
+                store.findAndUpdate(Collection.NODES, op);
+                return false;
+            }
         }
         // otherwise collision marker was set successfully
         LOG.debug("Marked collision on: {} for {} ({})",

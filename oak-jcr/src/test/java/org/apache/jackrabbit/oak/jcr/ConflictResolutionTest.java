@@ -30,13 +30,17 @@ import javax.jcr.RepositoryException;
 import javax.jcr.Session;
 
 import org.apache.jackrabbit.oak.commons.junit.LogCustomizer;
+import org.apache.jackrabbit.oak.fixture.NodeStoreFixture;
 import org.junit.After;
 import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
 
 import ch.qos.logback.classic.Level;
 
 import com.google.common.collect.Sets;
 
+@RunWith(Parameterized.class)
 public class ConflictResolutionTest extends AbstractRepositoryTest {
 
     // TODO add tests for all ConflictType types to observe generated logs

@@ -23,19 +23,24 @@ import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.INDEX_DEFIN
 import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.REINDEX_PROPERTY_NAME;
 import static org.apache.jackrabbit.oak.plugins.index.IndexUtils.createIndexDefinition;
 import static org.apache.jackrabbit.oak.plugins.index.property.PropertyIndexEditorProvider.TYPE;
+import static org.hamcrest.CoreMatchers.containsString;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.Callable;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
@@ -45,6 +50,7 @@ import javax.management.openmbean.CompositeData;
 import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.api.PropertyState;
 import org.apache.jackrabbit.oak.api.Type;
+import org.apache.jackrabbit.oak.api.jmx.IndexStatsMBean;
 import org.apache.jackrabbit.oak.commons.junit.LogCustomizer;
 import org.apache.jackrabbit.oak.plugins.index.AsyncIndexUpdate.AsyncIndexStats;
 import org.apache.jackrabbit.oak.plugins.index.AsyncIndexUpdate.IndexTaskSpliter;
@@ -61,6 +67,7 @@ import org.apache.jackrabbit.oak.spi.state.ConflictAnnotatingRebaseDiff;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
+import org.apache.jackrabbit.oak.spi.state.ProxyNodeStore;
 import org.junit.Test;
 
 import ch.qos.logback.classic.Level;
@@ -584,6 +591,88 @@ public class AsyncIndexUpdateTest {
         assertEquals("", stats.getFailingSince());
     }
 
+    @Test
+    public void cpCleanupNoRelease() throws Exception {
+        final MemoryNodeStore mns = new MemoryNodeStore();
+        final AtomicBoolean canRelease = new AtomicBoolean(false);
+
+        ProxyNodeStore store = new ProxyNodeStore() {
+
+            @Override
+            protected NodeStore getNodeStore() {
+                return mns;
+            }
+
+            @Override
+            public boolean release(String checkpoint) {
+                if (canRelease.get()) {
+                    return super.release(checkpoint);
+                }
+                return false;
+            }
+        };
+
+        IndexEditorProvider provider = new PropertyIndexEditorProvider();
+
+        NodeBuilder builder = store.getRoot().builder();
+        createIndexDefinition(builder.child(INDEX_DEFINITIONS_NAME),
+                "rootIndex", true, false, ImmutableSet.of("foo"), null)
+                .setProperty(ASYNC_PROPERTY_NAME, "async");
+        builder.child("testRoot").setProperty("foo", "abc");
+        store.merge(builder, EmptyHook.INSTANCE, CommitInfo.EMPTY);
+
+        assertTrue("Expecting no checkpoints",
+                mns.listCheckpoints().size() == 0);
+
+        AsyncIndexUpdate async = new AsyncIndexUpdate("async", store, provider);
+        async.run();
+        assertTrue("Expecting one checkpoint",
+                mns.listCheckpoints().size() == 1);
+        assertTrue(
+                "Expecting one temp checkpoint",
+                newHashSet(
+                        store.getRoot().getChildNode(AsyncIndexUpdate.ASYNC)
+                                .getStrings("async-temp")).size() == 1);
+
+        builder = store.getRoot().builder();
+        builder.child("testRoot").setProperty("foo", "def");
+        store.merge(builder, EmptyHook.INSTANCE, CommitInfo.EMPTY);
+
+        async.run();
+        assertTrue("Expecting two checkpoints",
+                mns.listCheckpoints().size() == 2);
+        assertTrue(
+                "Expecting two temp checkpoints",
+                newHashSet(
+                        store.getRoot().getChildNode(AsyncIndexUpdate.ASYNC)
+                                .getStrings("async-temp")).size() == 2);
+
+        canRelease.set(true);
+
+        builder = store.getRoot().builder();
+        builder.child("testRoot").setProperty("foo", "ghi");
+        store.merge(builder, EmptyHook.INSTANCE, CommitInfo.EMPTY);
+        async.run();
+
+        assertTrue("Expecting one checkpoint",
+                mns.listCheckpoints().size() == 1);
+        String secondCp = mns.listCheckpoints().iterator().next();
+        assertEquals(
+                secondCp,
+                store.getRoot().getChildNode(AsyncIndexUpdate.ASYNC)
+                        .getString("async"));
+        // the temp cps size is 2 now but the unreferenced checkpoints have been
+        // cleared from the store already
+        for (String cp : store.getRoot().getChildNode(AsyncIndexUpdate.ASYNC)
+                .getStrings("async-temp")) {
+            if (cp.equals(secondCp)) {
+                continue;
+            }
+            assertNull("Temp checkpoint was already cleared from store",
+                    store.retrieve(cp));
+        }
+    }
+
     /**
      * OAK-2203 Test reindex behavior on an async index when the index provider is missing
      * for a given type
@@ -941,6 +1030,284 @@ public class AsyncIndexUpdateTest {
 
         assertEquals(Collections.emptyList(), customLogs.getLogs());
         customLogs.finished();
+    }
+
+    @Test
+    public void noRunWhenClosed() throws Exception{
+        NodeStore store = new MemoryNodeStore();
+        IndexEditorProvider provider = new PropertyIndexEditorProvider();
+
+        AsyncIndexUpdate async = new AsyncIndexUpdate("async", store, provider);
+        async.run();
+
+        async.close();
+        LogCustomizer lc = createLogCustomizer(Level.WARN);
+        async.run();
+        assertEquals(1, lc.getLogs().size());
+        assertThat(lc.getLogs().get(0), containsString("Could not acquire run permit"));
+
+        lc.finished();
+
+        async.close();
+    }
+
+    @Test
+    public void closeWithSoftLimit() throws Exception{
+        NodeStore store = new MemoryNodeStore();
+        IndexEditorProvider provider = new PropertyIndexEditorProvider();
+        NodeBuilder builder = store.getRoot().builder();
+        createIndexDefinition(builder.child(INDEX_DEFINITIONS_NAME),
+                "rootIndex", true, false, ImmutableSet.of("foo"), null)
+                .setProperty(ASYNC_PROPERTY_NAME, "async");
+        builder.child("testRoot").setProperty("foo", "abc");
+
+        store.merge(builder, EmptyHook.INSTANCE, CommitInfo.EMPTY);
+
+        final Semaphore asyncLock = new Semaphore(1);
+        final AsyncIndexUpdate async = new AsyncIndexUpdate("async", store, provider) {
+            @Override
+            protected AsyncUpdateCallback newAsyncUpdateCallback(NodeStore store, String name, long leaseTimeOut,
+                                                                 String beforeCheckpoint, String afterCheckpoint,
+                                                                 AsyncIndexStats indexStats, AtomicBoolean stopFlag) {
+                try {
+                    asyncLock.acquire();
+                } catch (InterruptedException ignore) {
+                }
+                return super.newAsyncUpdateCallback(store, name, leaseTimeOut, beforeCheckpoint, afterCheckpoint,
+                        indexStats, stopFlag);
+            }
+        };
+
+        async.setCloseTimeOut(1000);
+
+        Thread t = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                async.run();
+            }
+        });
+
+        Thread closer = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                async.close();
+            }
+        });
+
+        asyncLock.acquire();
+        t.start();
+
+        //Wait till async gets to wait state i.e. inside run
+        while(!asyncLock.hasQueuedThreads());
+
+        LogCustomizer lc = createLogCustomizer(Level.DEBUG);
+        closer.start();
+
+        //Wait till closer is in waiting state
+        while(!async.isClosing());
+
+        //For softLimit case the flag should not be set
+        assertFalse(async.isClosed());
+        assertLogPhrase(lc.getLogs(), "[WAITING]");
+
+        //Let indexing run complete now
+        asyncLock.release();
+
+        //Wait for both threads
+        t.join();
+        closer.join();
+
+        //Close call should complete
+        assertLogPhrase(lc.getLogs(), "[CLOSED OK]");
+    }
+
+    @Test
+    public void closeWithHardLimit() throws Exception{
+        NodeStore store = new MemoryNodeStore();
+        IndexEditorProvider provider = new PropertyIndexEditorProvider();
+        NodeBuilder builder = store.getRoot().builder();
+        createIndexDefinition(builder.child(INDEX_DEFINITIONS_NAME),
+                "rootIndex", true, false, ImmutableSet.of("foo"), null)
+                .setProperty(ASYNC_PROPERTY_NAME, "async");
+        builder.child("testRoot").setProperty("foo", "abc");
+
+        store.merge(builder, EmptyHook.INSTANCE, CommitInfo.EMPTY);
+
+        final Semaphore asyncLock = new Semaphore(1);
+        final AsyncIndexUpdate async = new AsyncIndexUpdate("async", store, provider) {
+            @Override
+            protected AsyncUpdateCallback newAsyncUpdateCallback(NodeStore store, String name, long leaseTimeOut,
+                                                                 String beforeCheckpoint, String afterCheckpoint,
+                                                                 AsyncIndexStats indexStats, AtomicBoolean stopFlag) {
+                try {
+                    asyncLock.acquire();
+                } catch (InterruptedException ignore) {
+                }
+                return super.newAsyncUpdateCallback(store, name, leaseTimeOut, beforeCheckpoint, afterCheckpoint,
+                        indexStats, stopFlag);
+            }
+        };
+
+        //Set a 1 sec close timeout
+        async.setCloseTimeOut(1);
+
+        Thread t = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                async.run();
+            }
+        });
+
+        Thread closer = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                async.close();
+            }
+        });
+
+        //Lock to ensure that AsyncIndexUpdate waits
+        asyncLock.acquire();
+
+        t.start();
+
+        //Wait till async gets to wait state i.e. inside run
+        while(!asyncLock.hasQueuedThreads());
+
+        LogCustomizer lc = createLogCustomizer(Level.DEBUG);
+        closer.start();
+
+        //Wait till stopFlag is set
+        while(!async.isClosed());
+
+        assertLogPhrase(lc.getLogs(), "[SOFT LIMIT HIT]");
+
+        //Let indexing run complete now
+        asyncLock.release();
+
+        //Wait for both threads
+        t.join();
+
+        //Async run would have exited with log message logged
+        assertLogPhrase(lc.getLogs(), "The index update interrupted");
+
+        //Wait for close call to complete
+        closer.join();
+        lc.finished();
+    }
+
+    @Test
+    public void abortedRun() throws Exception{
+        NodeStore store = new MemoryNodeStore();
+        IndexEditorProvider provider = new PropertyIndexEditorProvider();
+        NodeBuilder builder = store.getRoot().builder();
+        createIndexDefinition(builder.child(INDEX_DEFINITIONS_NAME),
+                "rootIndex", true, false, ImmutableSet.of("foo"), null)
+                .setProperty(ASYNC_PROPERTY_NAME, "async");
+        builder.child("testRoot").setProperty("foo", "abc");
+
+        store.merge(builder, EmptyHook.INSTANCE, CommitInfo.EMPTY);
+
+        final Semaphore asyncLock = new Semaphore(1);
+        final AsyncIndexUpdate async = new AsyncIndexUpdate("async", store, provider) {
+            @Override
+            protected AsyncUpdateCallback newAsyncUpdateCallback(NodeStore store, String name, long leaseTimeOut,
+                                                                 String beforeCheckpoint, String afterCheckpoint,
+                                                                 AsyncIndexStats indexStats, AtomicBoolean stopFlag) {
+                return new AsyncUpdateCallback(store, name, leaseTimeOut, beforeCheckpoint, afterCheckpoint,
+                        indexStats, stopFlag){
+
+                    @Override
+                    public void indexUpdate() throws CommitFailedException {
+                        try {
+                            asyncLock.acquire();
+                        } catch (InterruptedException ignore) {
+                        }
+                        try {
+                            super.indexUpdate();
+                        }finally {
+                            asyncLock.release();
+                        }
+                    }
+                };
+            }
+        };
+
+        runOneCycle(async);
+        assertEquals(IndexStatsMBean.STATUS_DONE, async.getIndexStats().getStatus());
+
+        //Below we ensure that we interrupt while the indexing is in progress
+        //hence the use of asyncLock which ensures the abort is called at right time
+
+        //Now make some changes to
+        builder = store.getRoot().builder();
+        builder.child("testRoot2").setProperty("foo", "abc");
+        store.merge(builder, EmptyHook.INSTANCE, CommitInfo.EMPTY);
+
+        Thread t = new Thread(async);
+        //Lock to ensure that AsyncIndexUpdate waits
+        asyncLock.acquire();
+
+        t.start();
+
+        //Wait till async gets to wait state i.e. inside run
+        while(!asyncLock.hasQueuedThreads());
+
+        assertEquals(IndexStatsMBean.STATUS_RUNNING, async.getIndexStats().getStatus());
+        assertThat(async.getIndexStats().abortAndPause(), containsString("Abort request placed"));
+
+        asyncLock.release();
+
+        retry(5, 5, new Callable<Boolean>() {
+            @Override
+            public Boolean call() throws Exception {
+                return IndexStatsMBean.STATUS_INTERRUPTED.equals(async.getIndexStats().getStatus());
+            }
+        });
+
+        //Post abort indexing should be fine
+        runOneCycle(async);
+        assertTrue(async.getIndexStats().isPaused());
+
+        //Now resume indexing
+        async.getIndexStats().resume();
+
+        runOneCycle(async);
+        assertEquals(IndexStatsMBean.STATUS_DONE, async.getIndexStats().getStatus());
+        assertFalse(async.isClosed());
+    }
+
+
+
+    private void assertLogPhrase(List<String> logs, String logPhrase){
+        assertThat(logs.toString(), containsString(logPhrase));
+    }
+
+    private static LogCustomizer createLogCustomizer(Level level){
+        LogCustomizer lc = LogCustomizer.forLogger(AsyncIndexUpdate.class.getName())
+                .filter(level)
+                .enable(level)
+                .create();
+        lc.starting();
+        return lc;
+    }
+
+    private static void retry(int timeoutSeconds, int intervalBetweenTriesMsec, Callable<Boolean> c) {
+        long timeout = System.currentTimeMillis() + timeoutSeconds * 1000L;
+        while (System.currentTimeMillis() < timeout) {
+            try {
+                if (c.call()) {
+                    return;
+                }
+            } catch (Exception ignore) {
+            }
+
+            try {
+                Thread.sleep(intervalBetweenTriesMsec);
+            } catch (InterruptedException ignore) {
+            }
+        }
+
+        fail("RetryLoop failed, condition is false after " + timeoutSeconds + " seconds: ");
     }
 
 }

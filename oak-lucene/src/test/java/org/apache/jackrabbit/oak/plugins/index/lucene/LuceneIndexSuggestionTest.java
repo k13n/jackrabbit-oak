@@ -16,17 +16,6 @@
  */
 package org.apache.jackrabbit.oak.plugins.index.lucene;
 
-import org.apache.jackrabbit.JcrConstants;
-import org.apache.jackrabbit.api.JackrabbitSession;
-import org.apache.jackrabbit.commons.jackrabbit.authorization.AccessControlUtils;
-import org.apache.jackrabbit.oak.jcr.Jcr;
-import org.apache.jackrabbit.oak.spi.commit.Observer;
-import org.apache.jackrabbit.oak.spi.query.QueryIndexProvider;
-import org.junit.Before;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.TemporaryFolder;
-
 import javax.jcr.Node;
 import javax.jcr.Repository;
 import javax.jcr.Session;
@@ -38,13 +27,22 @@ import javax.jcr.query.Row;
 import javax.jcr.query.RowIterator;
 import javax.jcr.security.Privilege;
 
-import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.INDEX_DEFINITIONS_NAME;
-import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.INDEX_DEFINITIONS_NODE_TYPE;
-import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.REINDEX_PROPERTY_NAME;
-import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.TYPE_PROPERTY_NAME;
+import org.apache.jackrabbit.JcrConstants;
+import org.apache.jackrabbit.api.JackrabbitSession;
+import org.apache.jackrabbit.commons.jackrabbit.authorization.AccessControlUtils;
+import org.apache.jackrabbit.oak.jcr.Jcr;
+import org.apache.jackrabbit.oak.spi.commit.Observer;
+import org.apache.jackrabbit.oak.spi.query.QueryIndexProvider;
+import org.junit.After;
+import org.junit.Before;
+import org.junit.Rule;
+import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
+
+import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.*;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.INDEX_RULES;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
+import static org.apache.jackrabbit.oak.plugins.index.lucene.TestUtil.shutdown;
+import static org.junit.Assert.*;
 
 @SuppressWarnings("ConstantConditions")
 public class LuceneIndexSuggestionTest {
@@ -67,11 +65,22 @@ public class LuceneIndexSuggestionTest {
                 .with(new LuceneIndexEditorProvider());
 
         repository = jcr.createRepository();
-        session = (JackrabbitSession)repository.login(new SimpleCredentials("admin", "admin".toCharArray()));
+        session = (JackrabbitSession) repository.login(new SimpleCredentials("admin", "admin".toCharArray()));
         root = session.getRootNode();
     }
 
-    private void createSuggestIndex(String name, String indexedNodeType, String indexedPropertyName, boolean addFullText)
+    @After
+    public void after() {
+        session.logout();
+        shutdown(repository);
+    }
+
+    private void createSuggestIndex(String name, String indexedNodeType, String indexedPropertyName)
+            throws Exception {
+        createSuggestIndex(name, indexedNodeType, indexedPropertyName, false, false);
+    }
+
+    private void createSuggestIndex(String name, String indexedNodeType, String indexedPropertyName, boolean addFullText, boolean suggestAnalyzed)
             throws Exception {
         Node def = root.getNode(INDEX_DEFINITIONS_NAME)
                 .addNode(name, INDEX_DEFINITIONS_NODE_TYPE);
@@ -79,6 +88,10 @@ public class LuceneIndexSuggestionTest {
         def.setProperty(REINDEX_PROPERTY_NAME, true);
         def.setProperty("name", name);
         def.setProperty(LuceneIndexConstants.COMPAT_MODE, IndexFormatVersion.V2.getVersion());
+        if (suggestAnalyzed) {
+            def.addNode(LuceneIndexConstants.SUGGESTION_CONFIG).setProperty("suggestAnalyzed", suggestAnalyzed);
+        }
+
 
         Node propertyIdxDef = def.addNode(INDEX_RULES, JcrConstants.NT_UNSTRUCTURED)
                 .addNode(indexedNodeType, JcrConstants.NT_UNSTRUCTURED)
@@ -100,12 +113,12 @@ public class LuceneIndexSuggestionTest {
     private void checkSuggestions(final String nodeType,
                                   final String indexPropName, final String indexPropValue,
                                   final boolean addFullText, final boolean useUserSession,
-                                  final String suggestQueryText, final boolean shouldSuggest)
+                                  final String suggestQueryText, final boolean shouldSuggest, final boolean suggestAnalyzed)
             throws Exception {
         checkSuggestions(nodeType, nodeType,
                 indexPropName, indexPropValue,
                 addFullText, useUserSession,
-                suggestQueryText, shouldSuggest);
+                suggestQueryText, shouldSuggest, suggestAnalyzed);
     }
 
     /**
@@ -115,15 +128,23 @@ public class LuceneIndexSuggestionTest {
     private void checkSuggestions(final String indexNodeType, final String queryNodeType,
                                   final String indexPropName, final String indexPropValue,
                                   final boolean addFullText, final boolean useUserSession,
-                                  final String suggestQueryText, final boolean shouldSuggest)
+                                  final String suggestQueryText, final boolean shouldSuggest,
+                                  final boolean suggestAnalyzed)
             throws Exception {
-        createSuggestIndex("lucene-suggest", indexNodeType, indexPropName, addFullText);
+        createSuggestIndex("lucene-suggest", indexNodeType, indexPropName, addFullText, suggestAnalyzed);
 
-        Node indexedNode = root.addNode("indexedNode", queryNodeType);
-        indexedNode.setProperty(indexPropName, indexPropValue);
+        Node indexedNode = root.addNode("indexedNode1", queryNodeType);
+
+        if (indexPropValue != null) {
+            indexedNode.setProperty(indexPropName, indexPropValue + " 1");
+            indexedNode = root.addNode("indexedNode2", queryNodeType);
+            indexedNode.setProperty(indexPropName, indexPropValue + " 2");
+        }
+
         if (useUserSession) {
             session.getUserManager().createUser(TEST_USER_NAME, TEST_USER_NAME);
         }
+
         session.save();
 
         Session userSession = session;
@@ -140,51 +161,46 @@ public class LuceneIndexSuggestionTest {
         RowIterator rows = result.getRows();
 
         String value = null;
-        if (rows.hasNext()) {
+        while (rows.hasNext()) {
             Row firstRow = rows.nextRow();
             value = firstRow.getValue("suggestion").getString();
         }
-        Suggestion suggestion = Suggestion.fromString(value);
 
         if (shouldSuggest) {
-            assertNotNull("There should be some suggestion", suggestion.getSuggestion());
+            assertNotNull("There should be some suggestion", value);
         } else {
-            assertNull("There shouldn't be any suggestion", suggestion.getSuggestion());
+            assertNull("There shouldn't be any suggestion", value);
         }
+        userSession.logout();
     }
 
     private String createSuggestQuery(String nodeTypeName, String suggestFor) {
-        return "SELECT [rep:suggest()] as suggestion  FROM [" + nodeTypeName + "] WHERE suggest('" + suggestFor + "')";
+        return "SELECT [rep:suggest()] as suggestion, [jcr:score] as score  FROM [" + nodeTypeName + "] WHERE suggest('" + suggestFor + "')";
     }
 
-    static class Suggestion {
-        private final long weight;
-        private final String suggestion;
-        Suggestion(String suggestion, long weight) {
-            this.suggestion = suggestion;
-            this.weight = weight;
+    //OAK-3825
+    @Test
+    public void suggestNodeName() throws Exception {
+        final String nodeType = "nt:unstructured";
+
+        createSuggestIndex("lucene-suggest", nodeType, LuceneIndexConstants.PROPDEF_PROP_NODE_NAME);
+
+        root.addNode("indexedNode", nodeType);
+        session.save();
+
+        String suggQuery = createSuggestQuery(nodeType, "indexedn");
+        QueryManager queryManager = session.getWorkspace().getQueryManager();
+        QueryResult result = queryManager.createQuery(suggQuery, Query.JCR_SQL2).execute();
+        RowIterator rows = result.getRows();
+
+        String value = null;
+        while (rows.hasNext()) {
+            Row firstRow = rows.nextRow();
+            value = firstRow.getValue("suggestion").getString();
+            break;
         }
 
-        long getWeight() {
-            return weight;
-        }
-
-        String getSuggestion() {
-            return suggestion;
-        }
-
-        static Suggestion fromString(String suggestionResultStr) {
-            if (suggestionResultStr==null || "".equals(suggestionResultStr) || "[]".equals(suggestionResultStr)) {
-                return new Suggestion(null, -1);
-            }
-
-            String [] parts = suggestionResultStr.split(",weight=", 2);
-            int endWeightIdx = parts[1].lastIndexOf("}");
-            long weight = Long.parseLong(parts[1].substring(0, endWeightIdx));
-            String suggestion = parts[0].split("=", 2)[1];
-
-            return new Suggestion(suggestion, weight);
-        }
+        assertEquals("Node name should be suggested", "indexedNode", value);
     }
 
     //OAK-3157
@@ -199,7 +215,50 @@ public class LuceneIndexSuggestionTest {
         checkSuggestions(nodeType,
                 indexPropName, indexPropValue,
                 false, false,
-                suggestQueryText, shouldSuggest);
+                suggestQueryText, shouldSuggest, false);
+    }
+
+    //OAK-4126
+    @Test
+    public void testSuggestQuerySpecialChars() throws Exception {
+        final String nodeType = "nt:unstructured";
+        final String indexPropName = "description";
+        final String indexPropValue = "DD~@#$%^&*()_+{}\":?><`1234567890-=[]";
+        final String suggestQueryText = "dd";
+        final boolean shouldSuggest = true;
+
+        checkSuggestions(nodeType,
+                indexPropName, indexPropValue,
+                false, false,
+                suggestQueryText, shouldSuggest, false);
+    }
+
+    @Test
+    public void avoidInfiniteSuggestions() throws Exception {
+        final String nodeType = "nt:unstructured";
+        final String indexPropName = "description";
+        final String higherRankPropValue = "DD DD DD DD";
+        final String exceptionThrowingPropValue = "DD~@#$%^&*()_+{}\":?><`1234567890-=[]";
+        final String suggestQueryText = "dd";
+
+        createSuggestIndex("lucene-suggest", nodeType, indexPropName);
+
+        root.addNode("higherRankNode", nodeType).setProperty(indexPropName, higherRankPropValue);
+        root.addNode("exceptionThrowingNode", nodeType).setProperty(indexPropName, exceptionThrowingPropValue);
+        session.save();
+
+        String suggQuery = createSuggestQuery(nodeType, suggestQueryText);
+        QueryManager queryManager = session.getWorkspace().getQueryManager();
+        QueryResult result = queryManager.createQuery(suggQuery, Query.JCR_SQL2).execute();
+        RowIterator rows = result.getRows();
+
+        int count = 0;
+        while (count < 3 && rows.hasNext()) {
+            count++;
+            rows.nextRow();
+        }
+
+        assertTrue("There must not be more than 2 suggestions", count <= 2);
     }
 
     //OAK-3156
@@ -214,7 +273,7 @@ public class LuceneIndexSuggestionTest {
         checkSuggestions(nodeType,
                 indexPropName, indexPropValue,
                 false, true,
-                suggestQueryText, shouldSuggest);
+                suggestQueryText, shouldSuggest, false);
     }
 
     //OAK-3156
@@ -225,12 +284,12 @@ public class LuceneIndexSuggestionTest {
         final String indexPropName = "description";
         final String indexPropValue = "this is just a sample text which should get some response in suggestions";
         final String suggestQueryText = "th";
-        final boolean shouldSuggest = true;
+        final boolean shouldSuggest = false;
 
         checkSuggestions(indexNodeType, queryNodeType,
                 indexPropName, indexPropValue,
                 true, false,
-                suggestQueryText, shouldSuggest);
+                suggestQueryText, shouldSuggest, false);
     }
 
     //OAK-3156
@@ -245,6 +304,63 @@ public class LuceneIndexSuggestionTest {
         checkSuggestions(nodeType,
                 indexPropName, indexPropValue,
                 true, false,
-                suggestQueryText, shouldSuggest);
+                suggestQueryText, shouldSuggest, false);
+    }
+
+    //OAK-3509
+    @Test
+    public void testMultipleSuggestions() throws Exception {
+        final String nodeType = "oak:Unstructured";
+        final String indexPropName = "description";
+        final String indexPropValue = "this is just a sample text which should get some response in suggestions";
+        final String suggestQueryText = "th";
+        final boolean shouldSuggest = true;
+
+        checkSuggestions(nodeType,
+                indexPropName, indexPropValue,
+                true, false,
+                suggestQueryText, shouldSuggest, false);
+    }
+
+    //OAK-3407
+    @Test
+    public void testSuggestQueryAnalyzed() throws Exception {
+        final String nodeType = "nt:unstructured";
+        final String indexPropName = "description";
+        final String indexPropValue = "this is just a sample text which should get some response in suggestions";
+        final String suggestQueryText = "sa";
+
+        checkSuggestions(nodeType,
+                indexPropName, indexPropValue,
+                true, true,
+                suggestQueryText, true, true);
+    }
+
+    //OAK-3149
+    @Test
+    public void testSuggestQueryInfix() throws Exception {
+        final String nodeType = "nt:unstructured";
+        final String indexPropName = "description";
+        final String indexPropValue = "this is just a sample text which should get some response in suggestions";
+        final String suggestQueryText = "sa";
+
+        checkSuggestions(nodeType,
+                indexPropName, indexPropValue,
+                true, true,
+                suggestQueryText, true, false);
+    }
+
+    //OAK-4067
+    @Test
+    public void emptySuggestWithNothingIndexed() throws Exception {
+        final String nodeType = "nt:unstructured";
+        final String indexPropName = "description";
+        final String indexPropValue = null;
+        final String suggestQueryText = null;
+
+        checkSuggestions(nodeType,
+                indexPropName, indexPropValue,
+                true, true,
+                suggestQueryText, false, false);
     }
 }

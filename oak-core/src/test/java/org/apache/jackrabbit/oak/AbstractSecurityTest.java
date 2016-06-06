@@ -22,6 +22,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
 
+import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import javax.jcr.Credentials;
 import javax.jcr.NoSuchWorkspaceException;
@@ -52,7 +53,7 @@ import org.apache.jackrabbit.oak.plugins.name.NamespaceEditorProvider;
 import org.apache.jackrabbit.oak.plugins.nodetype.TypeEditorProvider;
 import org.apache.jackrabbit.oak.plugins.nodetype.write.InitialContent;
 import org.apache.jackrabbit.oak.plugins.value.ValueFactoryImpl;
-import org.apache.jackrabbit.oak.plugins.version.VersionEditorProvider;
+import org.apache.jackrabbit.oak.plugins.version.VersionHook;
 import org.apache.jackrabbit.oak.security.SecurityProviderImpl;
 import org.apache.jackrabbit.oak.spi.commit.EditorHook;
 import org.apache.jackrabbit.oak.spi.security.ConfigurationParameters;
@@ -84,7 +85,7 @@ public abstract class AbstractSecurityTest {
     public void before() throws Exception {
         Oak oak = new Oak()
                 .with(new InitialContent())
-                .with(new EditorHook(new VersionEditorProvider()))
+                .with(new VersionHook())
                 .with(JcrConflictHandler.createJcrConflictHandler())
                 .with(new NamespaceEditorProvider())
                 .with(new ReferenceEditorProvider())
@@ -116,6 +117,10 @@ public abstract class AbstractSecurityTest {
             }
             Configuration.setConfiguration(null);
         }
+    }
+
+    protected ContentRepository getContentRepository() {
+        return contentRepository;
     }
 
     protected SecurityProvider getSecurityProvider() {
@@ -197,6 +202,10 @@ public abstract class AbstractSecurityTest {
     }
 
     protected ValueFactory getValueFactory() {
+        return getValueFactory(root);
+    }
+
+    protected ValueFactory getValueFactory(@Nonnull Root root) {
         return new ValueFactoryImpl(root, getNamePathMapper());
     }
 

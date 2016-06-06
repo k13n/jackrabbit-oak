@@ -27,6 +27,7 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.BlockingQueue;
@@ -55,9 +56,12 @@ import com.google.common.base.Charsets;
 import com.google.common.base.Function;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
+import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import com.google.common.hash.Hashing;
+
 import org.apache.commons.io.FileUtils;
+import org.apache.jackrabbit.oak.commons.IOUtils;
 import org.apache.jackrabbit.oak.commons.concurrent.NotifyingFutureTask;
 import org.apache.jackrabbit.oak.util.PerfLogger;
 import org.apache.lucene.store.Directory;
@@ -157,29 +161,15 @@ public class IndexCopier implements CopyOnReadStatsMBean, Closeable {
 
     protected Directory createLocalDirForIndexWriter(IndexDefinition definition) throws IOException {
         String indexPath = definition.getIndexPathFromConfig();
-        File indexWriterDir;
-        if (indexPath == null){
-            //If indexPath is not known create a unique directory for work
-            indexWriterDir = new File(indexWorkDir, String.valueOf(UNIQUE_COUNTER.incrementAndGet()));
-        } else {
-            File indexDir = getIndexDir(indexPath);
-            String newVersion = String.valueOf(definition.getReindexCount());
-            indexWriterDir = getVersionedDir(indexPath, indexDir, newVersion);
-        }
+        File indexDir = getIndexDir(indexPath);
+        String newVersion = String.valueOf(definition.getReindexCount());
+        File indexWriterDir = getVersionedDir(indexPath, indexDir, newVersion);
 
         //By design indexing in Oak is single threaded so Lucene locking
         //can be disabled
         Directory dir = FSDirectory.open(indexWriterDir, NoLockFactory.getNoLockFactory());
 
         log.debug("IndexWriter would use {}", indexWriterDir);
-
-        if (indexPath == null) {
-            dir = new DeleteOldDirOnClose(dir, indexWriterDir);
-            log.debug("IndexPath [{}] not configured in index definition {}. Writer would create index " +
-                    "files in temporary dir {} which would be deleted upon close. For better performance do " +
-                    "configure the 'indexPath' as part of your index definition", LuceneIndexConstants.INDEX_PATH,
-                    definition, indexWriterDir);
-        }
         return dir;
     }
 
@@ -251,12 +241,6 @@ public class IndexCopier implements CopyOnReadStatsMBean, Closeable {
     private Set<String> getSharedWorkingSet(IndexDefinition defn){
         String indexPath = defn.getIndexPathFromConfig();
 
-        if (indexPath == null){
-            //With indexPath null the working directory would not
-            //be shared between COR and COW. So just return a new set
-            return new HashSet<String>();
-        }
-
         Set<String> sharedSet;
         synchronized (sharedWorkingSetMap){
             sharedSet = sharedWorkingSetMap.get(indexPath);
@@ -293,7 +277,7 @@ public class IndexCopier implements CopyOnReadStatsMBean, Closeable {
      * Directory implementation which lazily copies the index files from a
      * remote directory in background.
      */
-    private class CopyOnReadDirectory extends FilterDirectory {
+    class CopyOnReadDirectory extends FilterDirectory {
         private final Directory remote;
         private final Directory local;
         private final String indexPath;
@@ -380,13 +364,17 @@ public class IndexCopier implements CopyOnReadStatsMBean, Closeable {
             return remote.openInput(name, context);
         }
 
+        Directory getLocal() {
+            return local;
+        }
+
         private void copy(final CORFileReference reference) {
             updateMaxScheduled(scheduledForCopyCount.incrementAndGet());
             executor.execute(new Runnable() {
                 @Override
                 public void run() {
                     scheduledForCopyCount.decrementAndGet();
-                    copyFilesToLocal(reference, true);
+                    copyFilesToLocal(reference, true, true);
                 }
             });
         }
@@ -395,22 +383,26 @@ public class IndexCopier implements CopyOnReadStatsMBean, Closeable {
             long start = PERF_LOGGER.start();
             long totalSize = 0;
             int copyCount = 0;
+            List<String> copiedFileNames = Lists.newArrayList();
             for (String name : remote.listAll()) {
                 if (REMOTE_ONLY.contains(name)) {
                     continue;
                 }
                 CORFileReference fileRef = new CORFileReference(name);
                 files.putIfAbsent(name, fileRef);
-                long fileSize = copyFilesToLocal(fileRef, false);
+                long fileSize = copyFilesToLocal(fileRef, false, false);
                 if (fileSize > 0) {
                     copyCount++;
                     totalSize += fileSize;
+                    copiedFileNames.add(name);
                 }
             }
+
+            local.sync(copiedFileNames);
             PERF_LOGGER.end(start, -1, "[{}] Copied {} files totaling {}", indexPath, copyCount, humanReadableByteCount(totalSize));
         }
 
-        private long copyFilesToLocal(CORFileReference reference, boolean logDuration) {
+        private long copyFilesToLocal(CORFileReference reference, boolean sync, boolean logDuration) {
             String name = reference.name;
             boolean success = false;
             boolean copyAttempted = false;
@@ -429,6 +421,10 @@ public class IndexCopier implements CopyOnReadStatsMBean, Closeable {
 
                     remote.copy(local, name, name, IOContext.READ);
                     reference.markValid();
+
+                    if (sync) {
+                        local.sync(Collections.singleton(name));
+                    }
 
                     doneCopy(file, start);
                     if (logDuration) {
@@ -760,7 +756,7 @@ public class IndexCopier implements CopyOnReadStatsMBean, Closeable {
             skippedFromUploadSize.addAndGet(skippedFilesSize);
 
             String msg = "[COW][{}] CopyOnWrite stats : Skipped copying {} files with total size {}";
-            if (reindexMode || skippedFilesSize > 10 * FileUtils.ONE_MB){
+            if ((reindexMode && skippedFilesSize > 0) || skippedFilesSize > 10 * FileUtils.ONE_MB){
                 log.info(msg, indexPathForLogging, skippedFiles.size(), humanReadableByteCount(skippedFilesSize));
             } else {
                 log.debug(msg,indexPathForLogging, skippedFiles.size(), humanReadableByteCount(skippedFilesSize));
@@ -827,7 +823,8 @@ public class IndexCopier implements CopyOnReadStatsMBean, Closeable {
                     local.copy(remote, name, name, IOContext.DEFAULT);
 
                     doneCopy(file, start);
-                    PERF_LOGGER.end(perfStart, 0, "[COW][{}] Copied to remote {} ",indexPathForLogging, name);
+                    PERF_LOGGER.end(perfStart, 0, "[COW][{}] Copied to remote {} -- size: {}",
+                        indexPathForLogging, name, IOUtils.humanReadableByteCount(fileSize));
                     return null;
                 }
 

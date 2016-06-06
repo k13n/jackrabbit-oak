@@ -23,7 +23,7 @@
     <parent>
         <groupId>org.apache.jackrabbit</groupId>
         <artifactId>oak-parent</artifactId>
-        <version>1.4-SNAPSHOT</version>
+        <version>1.6-SNAPSHOT</version>
         <relativePath>../oak-parent/pom.xml</relativePath>
     </parent>
 
@@ -58,6 +58,13 @@
             org.apache.jackrabbit.core.query.ExcerptTest#testPunctuationStartsFragment                     <!-- OAK-318 -->
             org.apache.jackrabbit.core.query.ExcerptTest#testPunctuationStartsFragmentEndsWithDots         <!-- OAK-318 -->
             org.apache.jackrabbit.core.query.ExcerptTest#testPreferPhrase                                  <!-- OAK-318 -->
+            org.apache.jackrabbit.core.query.ExcerptTest#testQuotedPhrase                                  <!-- OAK-3580 -->
+            org.apache.jackrabbit.core.query.ExcerptTest#testEncodeIllegalCharsHighlights                  <!-- OAK-3580 -->
+            org.apache.jackrabbit.core.query.JoinTest#testJoinWithOR3                                      <!-- OAK-3437 -->
+            org.apache.jackrabbit.core.query.JoinTest#testJoinWithOR4                                      <!-- OAK-3437 -->
+            org.apache.jackrabbit.core.query.JoinTest#testJoinWithOR5                                      <!-- OAK-3437 -->
+            org.apache.jackrabbit.oak.jcr.query.SpellcheckTest#testSpellcheckMultipleWords                 <!-- OAK-3355 -->
+            org.apache.jackrabbit.oak.jcr.query.FacetTest                                                  <!-- OAK-3809 -->
         </known.issues>
     </properties>
 
@@ -107,6 +114,12 @@
             <scope>test</scope>
         </dependency>
         <dependency>
+            <groupId>org.apache.jackrabbit</groupId>
+            <artifactId>oak-segment</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
           <groupId>org.apache.jackrabbit</groupId>
           <artifactId>oak-jcr</artifactId>
           <version>${project.version}</version>
@@ -122,7 +135,7 @@
         <dependency>
           <groupId>org.apache.jackrabbit</groupId>
           <artifactId>jackrabbit-jcr-tests</artifactId>
-          <version>${jackrabbit.version}</version>
+          <version>2.13.0-SNAPSHOT</version>
           <scope>test</scope>
         </dependency>
         <dependency>

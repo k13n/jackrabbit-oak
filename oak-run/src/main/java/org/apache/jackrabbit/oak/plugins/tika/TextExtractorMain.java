@@ -19,34 +19,43 @@
 
 package org.apache.jackrabbit.oak.plugins.tika;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static java.util.Arrays.asList;
+
 import java.io.Closeable;
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.List;
+import java.util.Map;
+import java.util.Properties;
+import java.util.UUID;
 
+import com.google.common.collect.Maps;
 import com.google.common.io.Closer;
 import com.mongodb.MongoClientURI;
 import com.mongodb.MongoURI;
 import joptsimple.OptionParser;
 import joptsimple.OptionSet;
 import joptsimple.OptionSpec;
+import org.apache.commons.io.FileUtils;
+import org.apache.commons.io.IOUtils;
+import org.apache.jackrabbit.aws.ext.ds.S3DataStore;
+import org.apache.jackrabbit.core.data.DataStore;
+import org.apache.jackrabbit.core.data.DataStoreException;
 import org.apache.jackrabbit.core.data.FileDataStore;
+import org.apache.jackrabbit.oak.commons.PropertiesUtil;
 import org.apache.jackrabbit.oak.plugins.blob.datastore.DataStoreBlobStore;
 import org.apache.jackrabbit.oak.plugins.blob.datastore.DataStoreTextWriter;
 import org.apache.jackrabbit.oak.plugins.document.DocumentMK;
 import org.apache.jackrabbit.oak.plugins.document.DocumentNodeStore;
 import org.apache.jackrabbit.oak.plugins.document.util.MongoConnection;
-import org.apache.jackrabbit.oak.plugins.segment.SegmentNodeStore;
 import org.apache.jackrabbit.oak.plugins.segment.file.FileStore;
-import org.apache.jackrabbit.oak.run.Main;
 import org.apache.jackrabbit.oak.spi.blob.BlobStore;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.base.Preconditions.checkNotNull;
-import static java.util.Arrays.asList;
 
 public class TextExtractorMain {
     private static final Logger log = LoggerFactory.getLogger(TextExtractorMain.class);
@@ -68,6 +77,9 @@ public class TextExtractorMain {
                     .withRequiredArg()
                     .ofType(String.class);
 
+            OptionSpec segmentTar = parser
+                    .accepts("segment-tar", "Use oak-segment-tar instead of oak-segment");
+
             OptionSpec<String> pathSpec = parser
                     .accepts("path", "Path in repository under which the binaries would be searched")
                     .withRequiredArg()
@@ -85,6 +97,11 @@ public class TextExtractorMain {
 
             OptionSpec<File> fdsDirSpec = parser
                     .accepts("fds-path", "Path of directory used by FileDataStore")
+                    .withRequiredArg()
+                    .ofType(File.class);
+
+            OptionSpec<File> s3ConfigSpec = parser
+                    .accepts("s3-config-path", "Path of properties file containing config for S3DataStore")
                     .withRequiredArg()
                     .ofType(File.class);
 
@@ -118,7 +135,6 @@ public class TextExtractorMain {
             boolean extract = nonOptions.contains("extract");
             boolean generate = nonOptions.contains("generate");
             File dataFile = null;
-            File fdsDir;
             File storeDir = null;
             File tikaConfigFile = null;
             BlobStore blobStore = null;
@@ -141,12 +157,38 @@ public class TextExtractorMain {
             }
 
             if (options.has(fdsDirSpec)) {
-                fdsDir = fdsDirSpec.value(options);
+                File fdsDir = fdsDirSpec.value(options);
                 checkArgument(fdsDir.exists(), "FileDataStore %s does not exist", fdsDir.getAbsolutePath());
                 FileDataStore fds = new FileDataStore();
                 fds.setPath(fdsDir.getAbsolutePath());
                 fds.init(null);
                 blobStore = new DataStoreBlobStore(fds);
+            }
+
+            if (options.has(s3ConfigSpec)){
+                File s3Config = s3ConfigSpec.value(options);
+                checkArgument(s3Config.exists() && s3Config.canRead(), "S3DataStore config cannot be read from [%s]",
+                        s3Config.getAbsolutePath());
+                Properties props = loadProperties(s3Config);
+                log.info("Loaded properties for S3DataStore from {}", s3Config.getAbsolutePath());
+                String pathProp = "path";
+                String repoPath = props.getProperty(pathProp);
+                checkNotNull(repoPath, "Missing required property [%s] from S3DataStore config loaded from [%s]", pathProp, s3Config);
+
+                //Check if 'secret' key is defined. It should be non null for references
+                //to be generated. As the ref are transient we can just use any random value
+                //if not specified
+                String secretConfig = "secret";
+                if (props.getProperty(secretConfig) == null){
+                    props.setProperty(secretConfig, UUID.randomUUID().toString());
+                }
+
+                log.info("Using {} for S3DataStore ", repoPath);
+                DataStore ds = createS3DataStore(props);
+                PropertiesUtil.populate(ds, toMap(props), false);
+                ds.init(pathProp);
+                blobStore = new DataStoreBlobStore(ds);
+                closer.register(asCloseable(ds));
             }
 
             if (options.has(dataFileSpec)) {
@@ -174,7 +216,7 @@ public class TextExtractorMain {
                 checkNotNull(blobStore, "BlobStore found to be null. FileDataStore directory " +
                         "must be specified via %s", fdsDirSpec.options());
                 checkNotNull(dataFile, "Data file path not provided");
-                NodeStore nodeStore = bootStrapNodeStore(src, blobStore, closer);
+                NodeStore nodeStore = bootStrapNodeStore(src, options.has(segmentTar), blobStore, closer);
                 BinaryResourceProvider brp = new NodeStoreBinaryResourceProvider(nodeStore, blobStore);
                 CSVFileGenerator generator = new CSVFileGenerator(dataFile);
                 generator.generate(brp.getBinaries(path));
@@ -219,8 +261,32 @@ public class TextExtractorMain {
         }
     }
 
-    private static NodeStore bootStrapNodeStore(String src, BlobStore blobStore,
-                                                Closer closer) throws IOException {
+    private static Map<String, ?> toMap(Properties properties) {
+        Map<String, String> map = Maps.newHashMap();
+        for (final String name: properties.stringPropertyNames()) {
+            map.put(name, properties.getProperty(name));
+        }
+        return map;
+    }
+
+    private static DataStore createS3DataStore(Properties props) throws IOException {
+        S3DataStore s3ds = new S3DataStore();
+        s3ds.setProperties(props);
+        return s3ds;
+    }
+
+    private static Properties loadProperties(File s3Config) throws IOException {
+        Properties props = new Properties();
+        InputStream is = FileUtils.openInputStream(s3Config);
+        try{
+            props.load(is);
+        } finally {
+            IOUtils.closeQuietly(is);
+        }
+        return props;
+    }
+
+    private static NodeStore bootStrapNodeStore(String src, boolean segmentTar, BlobStore blobStore, Closer closer) throws IOException {
         if (src.startsWith(MongoURI.MONGODB_PREFIX)) {
             MongoClientURI uri = new MongoClientURI(src);
             if (uri.getDatabase() == null) {
@@ -236,12 +302,12 @@ public class TextExtractorMain {
             closer.register(asCloseable(store));
             return store;
         }
-        FileStore fs = FileStore.newFileStore(new File(src))
-                .withBlobStore(blobStore)
-                .withMemoryMapping(Main.TAR_STORAGE_MEMORY_MAPPED)
-                .create();
-        closer.register(asCloseable(fs));
-        return SegmentNodeStore.newSegmentNodeStore(fs).create();
+
+        if (segmentTar) {
+            return SegmentTarUtils.bootstrap(src, blobStore, closer);
+        }
+
+        return SegmentUtils.bootstrap(src, blobStore, closer);
     }
 
     private static Closeable asCloseable(final FileStore fs) {
@@ -249,6 +315,19 @@ public class TextExtractorMain {
             @Override
             public void close() throws IOException {
                 fs.close();
+            }
+        };
+    }
+
+    private static Closeable asCloseable(final DataStore ds) {
+        return new Closeable() {
+            @Override
+            public void close() throws IOException {
+                try {
+                    ds.close();
+                } catch (DataStoreException e) {
+                    throw new IOException(e);
+                }
             }
         };
     }

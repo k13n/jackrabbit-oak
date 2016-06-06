@@ -16,25 +16,20 @@
  */
 package org.apache.jackrabbit.oak.plugins.document.mongo;
 
-import java.util.List;
-import java.util.concurrent.atomic.AtomicInteger;
-
-import javax.annotation.Nonnull;
-
 import com.mongodb.DB;
 
 import org.apache.jackrabbit.oak.plugins.document.AbstractMongoConnectionTest;
 import org.apache.jackrabbit.oak.plugins.document.Collection;
 import org.apache.jackrabbit.oak.plugins.document.Document;
 import org.apache.jackrabbit.oak.plugins.document.DocumentMK;
+import org.apache.jackrabbit.oak.plugins.document.JournalEntry;
 import org.apache.jackrabbit.oak.plugins.document.MongoUtils;
 import org.apache.jackrabbit.oak.plugins.document.NodeDocument;
-import org.apache.jackrabbit.oak.plugins.document.util.Utils;
 import org.junit.Test;
 
-import static org.junit.Assert.assertEquals;
+import static org.apache.jackrabbit.oak.plugins.document.mongo.MongoUtils.hasIndex;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
 
 /**
  * <code>MongoDocumentStoreTest</code>...
@@ -54,54 +49,19 @@ public class MongoDocumentStoreTest extends AbstractMongoConnectionTest {
     }
 
     @Test
-    public void timeoutQuery() {
-        String fromId = Utils.getKeyLowerLimit("/");
-        String toId = Utils.getKeyUpperLimit("/");
-        store.setMaxLockedQueryTimeMS(1);
-        long index = 0;
-        for (int i = 0; i < 100; i++) {
-            // keep adding nodes until the query runs into the timeout
-            StringBuilder sb = new StringBuilder();
-            for (int j = 0; j < 1000; j++) {
-                sb.append("+\"node-").append(index++).append("\":{}");
-            }
-            mk.commit("/", sb.toString(), null, null);
-            store.queriesWithoutLock.set(0);
-            long lockCount = store.getLockAcquisitionCount();
-            List<NodeDocument> docs = store.query(Collection.NODES, fromId, toId,
-                    "foo", System.currentTimeMillis(), Integer.MAX_VALUE);
-            assertTrue(docs.isEmpty());
-            if (store.queriesWithoutLock.get() > 0) {
-                assertEquals(lockCount + 1, store.getLockAcquisitionCount());
-                return;
-            }
-        }
-        fail("No query timeout triggered even after adding " + index + " nodes");
+    public void defaultIndexes() {
+        assertTrue(hasIndex(store.getDBCollection(Collection.NODES), Document.ID));
+        assertTrue(hasIndex(store.getDBCollection(Collection.NODES), NodeDocument.SD_TYPE));
+        assertTrue(hasIndex(store.getDBCollection(Collection.NODES), NodeDocument.DELETED_ONCE));
+        assertTrue(hasIndex(store.getDBCollection(Collection.NODES), NodeDocument.HAS_BINARY_FLAG));
+        assertTrue(hasIndex(store.getDBCollection(Collection.NODES), NodeDocument.MODIFIED_IN_SECS, Document.ID));
+        assertFalse(hasIndex(store.getDBCollection(Collection.NODES), NodeDocument.MODIFIED_IN_SECS));
+        assertTrue(hasIndex(store.getDBCollection(Collection.JOURNAL), JournalEntry.MODIFIED));
     }
 
     static final class TestStore extends MongoDocumentStore {
-
-        AtomicInteger queriesWithoutLock = new AtomicInteger();
-
         TestStore(DB db, DocumentMK.Builder builder) {
             super(db, builder);
-        }
-
-        @Nonnull
-        @Override
-        <T extends Document> List<T> queryInternal(Collection<T> collection,
-                                                   String fromKey,
-                                                   String toKey,
-                                                   String indexedProperty,
-                                                   long startValue,
-                                                   int limit,
-                                                   long maxQueryTime,
-                                                   boolean withLock) {
-            if (collection == Collection.NODES && !withLock) {
-                queriesWithoutLock.incrementAndGet();
-            }
-            return super.queryInternal(collection, fromKey, toKey,
-                    indexedProperty, startValue, limit, maxQueryTime, withLock);
         }
     }
 }

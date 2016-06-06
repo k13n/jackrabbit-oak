@@ -218,9 +218,16 @@ public class FilterImpl implements Filter {
         return alwaysFalse;
     }
 
-    @Override
     public SelectorImpl getSelector() {
         return selector;
+    }
+
+    @Override @Nullable
+    public String getNodeType() {
+        if (selector == null) {
+            return null;
+        }
+        return selector.getNodeType();
     }
 
     @Override

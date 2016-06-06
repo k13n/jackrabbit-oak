@@ -86,6 +86,7 @@ import org.apache.jackrabbit.oak.plugins.identifier.IdentifierManager;
 import org.apache.jackrabbit.oak.plugins.memory.PropertyStates;
 import org.apache.jackrabbit.oak.plugins.nodetype.NodeTypeConstants;
 import org.apache.jackrabbit.oak.util.TreeUtil;
+import org.apache.jackrabbit.value.ValueHelper;
 
 /**
  * {@code NodeDelegate} serve as internal representations of {@code Node}s.
@@ -530,6 +531,7 @@ public class NodeDelegate extends ItemDelegate {
             if (TreeUtil.getBoolean(definition, JCR_MULTIPLE)) {
                 requiredType = requiredType.getArrayType();
             }
+            ValueHelper.checkSupportedConversion(propertyState.getType().tag(), requiredType.tag());
             propertyState = PropertyStates.convert(propertyState, requiredType);
         }
 
@@ -718,7 +720,7 @@ public class NodeDelegate extends ItemDelegate {
      *
      * @return whether this node is locked
      */
-    // FIXME: access to locking status should not depend on access rights
+    // FIXME: access to locking status should not depend on access rights (OAK-4234)
     public boolean isLocked() {
         return getLock() != null;
     }
@@ -751,7 +753,7 @@ public class NodeDelegate extends ItemDelegate {
     }
 
     private boolean holdsLock(Tree tree, boolean deep) {
-        // FIXME: access to locking status should not depend on access rights
+        // FIXME: access to locking status should not depend on access rights (OAK-4234)
         PropertyState property = tree.getProperty(JCR_LOCKISDEEP);
         return property != null
                 && property.getType() == Type.BOOLEAN

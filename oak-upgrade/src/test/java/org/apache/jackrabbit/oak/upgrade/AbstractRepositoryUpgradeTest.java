@@ -18,6 +18,9 @@
  */
 package org.apache.jackrabbit.oak.upgrade;
 
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
+
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
@@ -37,15 +40,13 @@ import org.apache.jackrabbit.core.RepositoryImpl;
 import org.apache.jackrabbit.core.config.RepositoryConfig;
 import org.apache.jackrabbit.oak.Oak;
 import org.apache.jackrabbit.oak.jcr.Jcr;
-import org.apache.jackrabbit.oak.plugins.segment.SegmentNodeStore;
+import org.apache.jackrabbit.oak.segment.SegmentNodeStoreBuilders;
+import org.apache.jackrabbit.oak.segment.memory.MemoryStore;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
 import org.apache.jackrabbit.oak.stats.Clock;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.BeforeClass;
-
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
 
 public abstract class AbstractRepositoryUpgradeTest {
 
@@ -71,7 +72,11 @@ public abstract class AbstractRepositoryUpgradeTest {
     }
 
     protected NodeStore createTargetNodeStore() {
-        return new SegmentNodeStore();
+        try {
+            return SegmentNodeStoreBuilders.builder(new MemoryStore()).build();
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     @Before

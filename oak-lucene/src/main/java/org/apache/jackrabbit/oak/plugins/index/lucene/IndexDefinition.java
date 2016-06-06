@@ -68,6 +68,7 @@ import org.apache.lucene.codecs.Codec;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.collect.Lists.newArrayList;
 import static com.google.common.collect.Lists.newArrayListWithCapacity;
 import static com.google.common.collect.Maps.newHashMap;
@@ -78,29 +79,15 @@ import static org.apache.jackrabbit.oak.api.Type.NAMES;
 import static org.apache.jackrabbit.oak.commons.PathUtils.getParentPath;
 import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.DECLARING_NODE_TYPES;
 import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.ENTRY_COUNT_PROPERTY_NAME;
+import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.INDEX_PATH;
 import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.REINDEX_COUNT;
-import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.ACTIVE_DELETE;
-import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.BLOB_SIZE;
-import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.COMPAT_MODE;
-import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.EVALUATE_PATH_RESTRICTION;
-import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.EXCLUDE_PROPERTY_NAMES;
-import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.EXPERIMENTAL_STORAGE;
-import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.FIELD_BOOST;
-import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.FULL_TEXT_ENABLED;
-import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.INCLUDE_PROPERTY_NAMES;
-import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.INCLUDE_PROPERTY_TYPES;
-import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.INDEX_DATA_CHILD_NAME;
-import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.ORDERED_PROP_NAMES;
-import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.PROP_NAME;
-import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.PROP_NODE;
-import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.TIKA;
-import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.TIKA_CONFIG;
+import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.*;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.PropertyDefinition.DEFAULT_BOOST;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.util.ConfigUtil.getOptionalValue;
 import static org.apache.jackrabbit.oak.plugins.memory.EmptyNodeState.EMPTY_NODE;
 import static org.apache.jackrabbit.oak.plugins.nodetype.NodeTypeConstants.NODE_TYPES_PATH;
 
-class IndexDefinition implements Aggregate.AggregateMapper{
+class IndexDefinition implements Aggregate.AggregateMapper {
     /**
      * Name of the internal property that contains the child order defined in
      * org.apache.jackrabbit.oak.plugins.tree.impl.TreeConstants
@@ -143,6 +130,11 @@ class IndexDefinition implements Aggregate.AggregateMapper{
     static final int TYPES_ALLOW_NONE = PropertyType.UNDEFINED;
 
     static final int TYPES_ALLOW_ALL = -1;
+
+    /**
+     * Deafult suggesterUpdateFrequencyMinutes
+     */
+    static final int DEFAULT_SUGGESTER_UPDATE_FREQUENCY_MINUTES = 10;
 
     /**
      * native sort order
@@ -218,23 +210,31 @@ class IndexDefinition implements Aggregate.AggregateMapper{
 
     private final boolean saveDirListing;
 
+    private final boolean suggestAnalyzed;
+
+    private final boolean secureFacets;
+
+    private final boolean suggestEnabled;
+
+    private final boolean spellcheckEnabled;
+
+    private final String indexPath;
+
+    public IndexDefinition(NodeState root, NodeBuilder defn) {
+        this(root, defn.getBaseState(), defn);
+    }
+
     public IndexDefinition(NodeState root, NodeState defn) {
         this(root, defn, null);
     }
 
-    public IndexDefinition(NodeState root, NodeBuilder defn) {
-        this(root, defn.getBaseState(), defn, null);
-    }
-
-    public IndexDefinition(NodeState root, NodeState defn, @Nullable String indexPath) {
-        this(root, defn, null, indexPath);
-    }
-
-    public IndexDefinition(NodeState root, NodeState defn, @Nullable NodeBuilder defnb, @Nullable String indexPath) {
+    public IndexDefinition(NodeState root, NodeState defn, @Nullable NodeBuilder defnb) {
         this.root = root;
         this.version = determineIndexFormatVersion(defn, defnb);
         this.definition = defn;
-        this.indexName = determineIndexName(defn, indexPath);
+        this.indexPath = determineIndexPath(defn, defnb);
+        this.indexName = indexPath;
+
         this.blobSize = getOptionalValue(defn, BLOB_SIZE, DEFAULT_BLOB_SIZE);
         this.activeDelete = getOptionalValue(defn, ACTIVE_DELETE, DEFAULT_ACTIVE_DELETE);
         this.testMode = getOptionalValue(defn, LuceneIndexConstants.TEST_MODE, false);
@@ -270,19 +270,28 @@ class IndexDefinition implements Aggregate.AggregateMapper{
         }
 
         this.maxFieldLength = getOptionalValue(defn, LuceneIndexConstants.MAX_FIELD_LENGTH, DEFAULT_MAX_FIELD_LENGTH);
-        this.costPerEntry = getOptionalValue(defn, LuceneIndexConstants.COST_PER_ENTRY, 1.0);
+        this.costPerEntry = getOptionalValue(defn, LuceneIndexConstants.COST_PER_ENTRY, getDefaultCostPerEntry(version));
         this.costPerExecution = getOptionalValue(defn, LuceneIndexConstants.COST_PER_EXECUTION, 1.0);
         this.indexesAllTypes = areAllTypesIndexed();
         this.analyzers = collectAnalyzers(defn);
         this.analyzer = createAnalyzer();
         this.hasCustomTikaConfig = getTikaConfigNode().exists();
         this.maxExtractLength = determineMaxExtractLength();
-        this.suggesterUpdateFrequencyMinutes = getOptionalValue(defn, LuceneIndexConstants.SUGGEST_UPDATE_FREQUENCY_MINUTES, 60);
+        this.suggesterUpdateFrequencyMinutes = evaluateSuggesterUpdateFrequencyMinutes(defn,
+                DEFAULT_SUGGESTER_UPDATE_FREQUENCY_MINUTES);
         this.scorerProviderName = getOptionalValue(defn, LuceneIndexConstants.PROP_SCORER_PROVIDER, null);
         this.reindexCount = determineReindexCount(defn, defnb);
         this.pathFilter = PathFilter.from(new ReadOnlyBuilder(defn));
         this.queryPaths = getQueryPaths(defn);
         this.saveDirListing = getOptionalValue(defn, LuceneIndexConstants.SAVE_DIR_LISTING, true);
+        this.suggestAnalyzed = evaluateSuggestAnalyzed(defn, false);
+        this.secureFacets = defn.hasChildNode(FACETS) && getOptionalValue(defn.getChildNode(FACETS), PROP_SECURE_FACETS, true);
+        this.suggestEnabled = evaluateSuggestionEnabled();
+        this.spellcheckEnabled = evaluateSpellcheckEnabled();
+    }
+
+    public NodeState getDefinitionNodeState() {
+        return definition;
     }
 
     public boolean isFullTextEnabled() {
@@ -315,6 +324,17 @@ class IndexDefinition implements Aggregate.AggregateMapper{
 
     public long getEntryCount() {
         return entryCount;
+    }
+
+    private int evaluateSuggesterUpdateFrequencyMinutes(NodeState defn, int defaultValue) {
+        NodeState suggestionConfig = defn.getChildNode(LuceneIndexConstants.SUGGESTION_CONFIG);
+
+        if (!suggestionConfig.exists()) {
+            //handle backward compatibility
+            return getOptionalValue(defn, LuceneIndexConstants.SUGGEST_UPDATE_FREQUENCY_MINUTES, defaultValue);
+        }
+
+        return getOptionalValue(suggestionConfig, LuceneIndexConstants.SUGGEST_UPDATE_FREQUENCY_MINUTES, defaultValue);
     }
 
     public int getSuggesterUpdateFrequencyMinutes() {
@@ -600,28 +620,67 @@ class IndexDefinition implements Aggregate.AggregateMapper{
         return ntBaseRule != null;
     }
 
-    public boolean isSuggestEnabled() {
-        boolean suggestEnabled = false;
+    private boolean evaluateSuggestionEnabled() {
         for (IndexingRule indexingRule : definedRules) {
             for (PropertyDefinition propertyDefinition : indexingRule.propConfigs.values()) {
                 if (propertyDefinition.useInSuggest) {
-                    suggestEnabled = true;
-                    break;
+                    return true;
                 }
             }
             for (NamePattern np : indexingRule.namePatterns) {
                 if (np.getConfig().useInSuggest) {
-                    suggestEnabled = true;
-                    break;
+                    return true;
                 }
             }
         }
+        return false;
+    }
+
+    public boolean isSuggestEnabled() {
         return suggestEnabled;
     }
 
-    @CheckForNull
+    private boolean evaluateSpellcheckEnabled() {
+        for (IndexingRule indexingRule : definedRules) {
+            for (PropertyDefinition propertyDefinition : indexingRule.propConfigs.values()) {
+                if (propertyDefinition.useInSpellcheck) {
+                    return true;
+                }
+            }
+            for (NamePattern np : indexingRule.namePatterns) {
+                if (np.getConfig().useInSpellcheck) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    public boolean isSpellcheckEnabled() {
+        return spellcheckEnabled;
+    }
+
     public String getIndexPathFromConfig() {
-        return definition.getString(LuceneIndexConstants.INDEX_PATH);
+        return checkNotNull(indexPath, "Index path property [%s] not found", IndexConstants.INDEX_PATH);
+    }
+
+    private boolean evaluateSuggestAnalyzed(NodeState defn, boolean defaultValue) {
+        NodeState suggestionConfig = defn.getChildNode(LuceneIndexConstants.SUGGESTION_CONFIG);
+
+        if (!suggestionConfig.exists()) {
+            //handle backward compatibility
+            return getOptionalValue(defn, LuceneIndexConstants.SUGGEST_ANALYZED, defaultValue);
+        }
+
+        return getOptionalValue(suggestionConfig, LuceneIndexConstants.SUGGEST_ANALYZED, defaultValue);
+    }
+
+    public boolean isSuggestAnalyzed() {
+        return suggestAnalyzed;
+    }
+
+    public boolean isSecureFacets() {
+        return secureFacets;
     }
 
     public class IndexingRule {
@@ -643,6 +702,7 @@ class IndexDefinition implements Aggregate.AggregateMapper{
         final int propertyTypes;
         final boolean fulltextEnabled;
         final boolean propertyIndexEnabled;
+        final boolean nodeFullTextIndexed;
 
         final Aggregate aggregate;
         final Aggregate propAggregate;
@@ -670,9 +730,10 @@ class IndexDefinition implements Aggregate.AggregateMapper{
             this.nullCheckEnabledProperties = ImmutableList.copyOf(nonExistentProperties);
             this.notNullCheckEnabledProperties = ImmutableList.copyOf(existentProperties);
             this.fulltextEnabled = aggregate.hasNodeAggregates() || hasAnyFullTextEnabledProperty();
+            this.nodeFullTextIndexed = aggregate.hasNodeAggregates() || anyNodeScopeIndexedProperty();
             this.propertyIndexEnabled = hasAnyPropertyIndexConfigured();
-            this.indexesAllNodesOfMatchingType = allMatchingNodeByTypeIndexed();
-            this.nodeNameIndexed = getOptionalValue(config, LuceneIndexConstants.INDEX_NODE_NAME, false);
+            this.indexesAllNodesOfMatchingType = areAlMatchingNodeByTypeIndexed();
+            this.nodeNameIndexed = evaluateNodeNameIndexed(config);
             validateRuleDefinition();
         }
 
@@ -698,7 +759,8 @@ class IndexDefinition implements Aggregate.AggregateMapper{
             this.nodeScopeAnalyzedProps = original.nodeScopeAnalyzedProps;
             this.aggregate = combine(propAggregate, nodeTypeName);
             this.fulltextEnabled = aggregate.hasNodeAggregates() || original.fulltextEnabled;
-            this.indexesAllNodesOfMatchingType = allMatchingNodeByTypeIndexed();
+            this.nodeFullTextIndexed = aggregate.hasNodeAggregates() || original.nodeFullTextIndexed;
+            this.indexesAllNodesOfMatchingType = areAlMatchingNodeByTypeIndexed();
             this.nodeNameIndexed = original.nodeNameIndexed;
         }
 
@@ -722,6 +784,13 @@ class IndexDefinition implements Aggregate.AggregateMapper{
          */
         public String getNodeTypeName() {
             return nodeTypeName;
+        }
+
+        /**
+         * @return name of the base node type.
+         */
+        public String getBaseNodeType() {
+            return baseNodeType;
         }
 
         public List<PropertyDefinition> getNullCheckEnabledProperties() {
@@ -787,9 +856,22 @@ class IndexDefinition implements Aggregate.AggregateMapper{
             return nodeNameIndexed;
         }
 
+        /**
+         * Returns true if the rule has any property definition which enables
+         * evaluation of fulltext related clauses
+         */
         public boolean isFulltextEnabled() {
             return fulltextEnabled;
         }
+
+        /**
+         * Returns true if a fulltext field for the node would be created
+         * for any node matching the current rule.
+         */
+        public boolean isNodeFullTextIndexed() {
+            return nodeFullTextIndexed;
+        }
+
         /**
          * @param propertyName name of a property.
          * @return the property configuration or <code>null</code> if this
@@ -920,10 +1002,26 @@ class IndexDefinition implements Aggregate.AggregateMapper{
             return false;
         }
 
-        private boolean allMatchingNodeByTypeIndexed(){
-            //Incase of fulltext all nodes matching this rule type would be indexed
-            //and would have entry in the index
-            if (fulltextEnabled){
+        private boolean anyNodeScopeIndexedProperty(){
+            //Check if there is any nodeScope indexed property as
+            //for such case a node would always be indexed
+            for (PropertyDefinition pd : propConfigs.values()){
+                if (pd.nodeScopeIndex){
+                    return true;
+                }
+            }
+
+            for (NamePattern np : namePatterns){
+                if (np.getConfig().nodeScopeIndex){
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private boolean areAlMatchingNodeByTypeIndexed(){
+            if (nodeFullTextIndexed){
                 return true;
             }
 
@@ -943,6 +1041,21 @@ class IndexDefinition implements Aggregate.AggregateMapper{
                 return true;
             }
 
+            return false;
+        }
+
+        private boolean evaluateNodeNameIndexed(NodeState config) {
+            //check global config first
+            if (getOptionalValue(config, LuceneIndexConstants.INDEX_NODE_NAME, false)) {
+                return true;
+            }
+
+            //iterate over property definitions
+            for (PropertyDefinition pd : propConfigs.values()){
+                if (LuceneIndexConstants.PROPDEF_PROP_NODE_NAME.equals(pd.name)){
+                    return true;
+                }
+            }
             return false;
         }
 
@@ -1035,7 +1148,7 @@ class IndexDefinition implements Aggregate.AggregateMapper{
             indexDefn.removeProperty(ORDERED_PROP_NAMES);
             indexDefn.removeProperty(FULL_TEXT_ENABLED);
             indexDefn.child(PROP_NODE).remove();
-            log.info("Updated index definition for {}", determineIndexName(defn, null));
+            log.info("Updated index definition for {}", indexDefn.getString(INDEX_PATH));
         }
         return indexDefn;
     }
@@ -1191,22 +1304,12 @@ class IndexDefinition implements Aggregate.AggregateMapper{
         return codec;
     }
 
-    private static String determineIndexName(NodeState defn, String indexPath) {
-        if (indexPath == null){
-            indexPath = defn.getString(LuceneIndexConstants.INDEX_PATH);
+    private static String determineIndexPath(NodeState defn, @Nullable  NodeBuilder defnb) {
+        String indexPath = defn.getString(IndexConstants.INDEX_PATH);
+        if (indexPath == null && defnb != null){
+            indexPath = defnb.getString(IndexConstants.INDEX_PATH);
         }
-        String indexName = defn.getString(PROP_NAME);
-        if (indexName ==  null){
-            if (indexPath != null) {
-                return indexPath;
-            }
-            return "<No 'name' property defined>";
-        }
-
-        if (indexPath != null){
-            return indexName + "(" + indexPath + ")";
-        }
-        return indexName;
+        return indexPath;
     }
 
     private static Set<String> getMultiProperty(NodeState definition, String propName){
@@ -1300,7 +1403,7 @@ class IndexDefinition implements Aggregate.AggregateMapper{
 
     private static boolean hasFulltextEnabledIndexRule(List<IndexingRule> rules) {
         for (IndexingRule rule : rules){
-            if (rule.fulltextEnabled){
+            if (rule.isFulltextEnabled()){
                 return true;
             }
         }
@@ -1407,6 +1510,12 @@ class IndexDefinition implements Aggregate.AggregateMapper{
 
     public boolean getActiveDeleteEnabled() {
         return activeDelete >= 0;
+    }
+
+    private static double getDefaultCostPerEntry(IndexFormatVersion version) {
+        //For older format cost per entry would be higher as it does a runtime
+        //aggregation
+        return version == IndexFormatVersion.V1 ?  1.5 : 1.0;
     }
 
 }

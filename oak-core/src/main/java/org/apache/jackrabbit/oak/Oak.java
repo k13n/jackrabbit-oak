@@ -46,9 +46,11 @@ import javax.jcr.NoSuchWorkspaceException;
 import javax.management.JMException;
 import javax.management.MBeanServer;
 import javax.management.ObjectName;
+import javax.management.StandardMBean;
 import javax.security.auth.login.LoginException;
 
 import com.google.common.base.Function;
+import com.google.common.base.Supplier;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.io.Closer;
@@ -60,8 +62,10 @@ import org.apache.jackrabbit.oak.api.Descriptors;
 import org.apache.jackrabbit.oak.api.Root;
 import org.apache.jackrabbit.oak.api.jmx.QueryEngineSettingsMBean;
 import org.apache.jackrabbit.oak.api.jmx.RepositoryManagementMBean;
+import org.apache.jackrabbit.oak.commons.concurrent.ExecutorCloser;
 import org.apache.jackrabbit.oak.core.ContentRepositoryImpl;
 import org.apache.jackrabbit.oak.management.RepositoryManager;
+import org.apache.jackrabbit.oak.plugins.atomic.AtomicCounterEditorProvider;
 import org.apache.jackrabbit.oak.plugins.commit.ConflictHook;
 import org.apache.jackrabbit.oak.plugins.index.AsyncIndexUpdate;
 import org.apache.jackrabbit.oak.plugins.index.CompositeIndexEditorProvider;
@@ -93,6 +97,7 @@ import org.apache.jackrabbit.oak.spi.query.CompositeQueryIndexProvider;
 import org.apache.jackrabbit.oak.spi.query.QueryIndexProvider;
 import org.apache.jackrabbit.oak.spi.security.SecurityConfiguration;
 import org.apache.jackrabbit.oak.spi.security.SecurityProvider;
+import org.apache.jackrabbit.oak.spi.state.Clusterable;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
@@ -148,6 +153,8 @@ public class Oak {
     private final Closer closer = Closer.create();
 
     private ContentRepository contentRepository;
+    
+    private Clusterable clusterable;
 
     /**
      * Default {@code ScheduledExecutorService} used for scheduling background tasks.
@@ -243,7 +250,7 @@ public class Oak {
     private Whiteboard whiteboard = new DefaultWhiteboard() {
         @Override
         public <T> Registration register(
-                Class<T> type, T service, Map<?, ?> properties) {
+                final Class<T> type, T service, Map<?, ?> properties) {
             final Registration registration =
                     super.register(type, service, properties);
 
@@ -277,9 +284,18 @@ public class Oak {
                     } else {
                         objectName = new ObjectName(String.valueOf(name));
                     }
-                    mbeanServer.registerMBean(service, objectName);
+
+                    if (type.getName().equals(service.getClass().getName().concat("MBean"))
+                            || service instanceof StandardMBean){
+                        mbeanServer.registerMBean(service, objectName);
+                    } else {
+                        //Wrap the MBean in std MBean
+                        mbeanServer.registerMBean(new StandardMBean(service, type), objectName);
+                    }
+
                 } catch (JMException e) {
-                    // ignore
+                    LOG.warn("Unexpected exception while registering MBean of type [{}] " +
+                            "against name [{}]", type, objectName, e);
                 }
             }
 
@@ -295,7 +311,8 @@ public class Oak {
                         try {
                             mbeanServer.unregisterMBean(on);
                         } catch (JMException e) {
-                            // ignore
+                            LOG.warn("Unexpected exception while unregistering MBean of type {} " +
+                                    "against name {} ", type, on, e);
                         }
                     }
                     try {
@@ -317,6 +334,8 @@ public class Oak {
      */
     private Map<String, Long> asyncTasks;
 
+    private boolean failOnMissingIndexProvider;
+
     public Oak(NodeStore store) {
         this.store = checkNotNull(store);
     }
@@ -326,7 +345,19 @@ public class Oak {
         // this(new DocumentMK.Builder().open());
         // this(new LogWrapper(new DocumentMK.Builder().open()));
     }
-
+    
+    /**
+     * Define the current repository as being a {@link Clusterable} one.
+     * 
+     * @param c
+     * @return
+     */
+    @Nonnull
+    public Oak with(@Nonnull Clusterable c) {
+        this.clusterable = checkNotNull(c);
+        return this;
+    }
+    
     /**
      * Sets the default workspace name that should be used in case of login
      * with {@code null} workspace name. If this method has not been called
@@ -513,7 +544,7 @@ public class Oak {
      * <p>
      * Please note that when enabling the background indexer, you need to take
      * care of calling
-     * <code>#shutdown<code> on the <code>executor<code> provided for this Oak instance.
+     * <code>#shutdown</code> on the <code>executor</code> provided for this Oak instance.
      * </p>
      * @deprecated Use {@link Oak#withAsyncIndexing(String, long)} instead
      */
@@ -522,6 +553,39 @@ public class Oak {
         return withAsyncIndexing("async", 5);
     }
 
+    public Oak withFailOnMissingIndexProvider(){
+        failOnMissingIndexProvider = true;
+        return this;
+    }
+
+    public Oak withAtomicCounter() {
+        return with(new AtomicCounterEditorProvider(
+            new Supplier<Clusterable>() {
+                @Override
+                public Clusterable get() {
+                    return clusterable;
+                }
+            },
+            new Supplier<ScheduledExecutorService>() {
+                @Override
+                public ScheduledExecutorService get() {
+                    return scheduledExecutor;
+                }
+            }, 
+            new Supplier<NodeStore>() {
+                @Override
+                public NodeStore get() {
+                    return store;
+                }
+            },
+            new Supplier<Whiteboard>() {
+                @Override
+                public Whiteboard get() {
+                    return whiteboard;
+                }
+            }));
+    }
+    
     /**
      * <p>
      * Enable the asynchronous (background) indexing behavior for the provided
@@ -530,7 +594,7 @@ public class Oak {
      * <p>
      * Please note that when enabling the background indexer, you need to take
      * care of calling
-     * <code>#shutdown<code> on the <code>executor<code> provided for this Oak instance.
+     * <code>#shutdown</code> on the <code>executor</code> provided for this Oak instance.
      * </p>
      */
     public Oak withAsyncIndexing(@Nonnull String name, long delayInSeconds) {
@@ -585,6 +649,7 @@ public class Oak {
                 AsyncIndexUpdate task = new AsyncIndexUpdate(t.getKey(), store,
                         indexEditors);
                 indexRegistration.registerAsyncIndexer(task, t.getValue());
+                closer.register(task);
             }
 
             PropertyIndexAsyncReindex asyncPI = new PropertyIndexAsyncReindex(
@@ -615,7 +680,7 @@ public class Oak {
                 workspaceInitializers, store, defaultWorkspaceName, indexEditors);
 
         // add index hooks later to prevent the OakInitializer to do excessive indexing
-        with(new IndexUpdateProvider(indexEditors));
+        with(new IndexUpdateProvider(indexEditors, failOnMissingIndexProvider));
         withEditorHook();
 
         // Register observer last to prevent sending events while initialising
@@ -627,11 +692,14 @@ public class Oak {
         regs.add(registerMBean(whiteboard, RepositoryManagementMBean.class, repositoryManager,
                 RepositoryManagementMBean.TYPE, repositoryManager.getName()));
 
+        CommitHook composite = CompositeHook.compose(commitHooks);
+        regs.add(whiteboard.register(CommitHook.class, composite, Collections.emptyMap()));
+        
         final Tracker<Descriptors> t = whiteboard.track(Descriptors.class);
 
         return new ContentRepositoryImpl(
                 store,
-                CompositeHook.compose(commitHooks),
+                composite,
                 defaultWorkspaceName,
                 queryEngineSettings,
                 indexProvider,
@@ -693,30 +761,6 @@ public class Oak {
      */
     public Root createRoot() {
         return createContentSession().getLatestRoot();
-    }
-
-    private static class ExecutorCloser implements Closeable {
-        final ExecutorService executorService;
-
-        private ExecutorCloser(ExecutorService executorService) {
-            this.executorService = executorService;
-        }
-
-        @Override
-        public void close() throws IOException {
-            try {
-                executorService.shutdown();
-                executorService.awaitTermination(5, TimeUnit.SECONDS);
-            } catch (InterruptedException e) {
-                LOG.error("Error while shutting down the executorService", e);
-                Thread.currentThread().interrupt();
-            } finally {
-                if (!executorService.isTerminated()) {
-                    LOG.warn("executorService didn't shutdown properly. Will be forced now.");
-                }
-                executorService.shutdownNow();
-            }
-        }
     }
 
     /**

@@ -16,12 +16,16 @@
  */
 package org.apache.jackrabbit.oak.plugins.document.rdb;
 
+import static org.apache.jackrabbit.oak.plugins.document.rdb.RDBJDBCTools.closeResultSet;
+import static org.apache.jackrabbit.oak.plugins.document.rdb.RDBJDBCTools.closeStatement;
+
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -29,6 +33,7 @@ import java.util.Map;
 
 import javax.annotation.Nonnull;
 
+import org.apache.jackrabbit.oak.plugins.document.rdb.RDBJDBCTools.PreparedStatementComponent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -36,6 +41,7 @@ import org.slf4j.LoggerFactory;
  * Defines variation in the capabilities of different RDBs.
  */
 public enum RDBDocumentStoreDB {
+
     DEFAULT("default") {
     },
 
@@ -44,17 +50,22 @@ public enum RDBDocumentStoreDB {
         public String checkVersion(DatabaseMetaData md) throws SQLException {
             return RDBJDBCTools.versionCheck(md, 1, 4, description);
         }
+
+        @Override
+        public String getInitializationStatement() {
+            return "create alias if not exists unix_timestamp as $$ long unix_timestamp() { return System.currentTimeMillis()/1000L; } $$;";
+        }
+
+        @Override
+        public String getCurrentTimeStampInSecondsSyntax() {
+            return "select unix_timestamp()";
+        }
     },
 
     DERBY("Apache Derby") {
         @Override
         public String checkVersion(DatabaseMetaData md) throws SQLException {
             return RDBJDBCTools.versionCheck(md, 10, 11, description);
-        }
-
-        @Override
-        public String getCurrentTimeStampInMsSyntax() {
-            return "CURRENT_TIMESTAMP";
         }
 
         @Override
@@ -66,7 +77,37 @@ public enum RDBDocumentStoreDB {
     POSTGRES("PostgreSQL") {
         @Override
         public String checkVersion(DatabaseMetaData md) throws SQLException {
-            return RDBJDBCTools.versionCheck(md, 9, 3, description);
+            String result = RDBJDBCTools.versionCheck(md, 9, 5, 9, 4, description);
+
+            if (result.isEmpty()) {
+                // special case: we need 9.4.1208 or newer (see OAK-3977)
+                if (md.getDriverMajorVersion() == 9 && md.getDriverMinorVersion() == 4) {
+                    String versionString = md.getDriverVersion();
+                    String scanfor = "9.4.";
+                    int p = versionString.indexOf(scanfor);
+                    if (p >= 0) {
+                        StringBuilder build = new StringBuilder();
+                        for (char c : versionString.substring(p + scanfor.length()).toCharArray()) {
+                            if (c >= '0' && c <= '9') {
+                                build.append(c);
+                            } else {
+                                break;
+                            }
+                        }
+                        if (Integer.parseInt(build.toString()) < 1208) {
+                            result = "Unsupported " + description + " driver version: " + md.getDriverVersion() + ", found build "
+                                    + build + ", but expected at least build 1208";
+                        }
+                    }
+                }
+            }
+
+            return result;
+        }
+
+        @Override
+        public String getCurrentTimeStampInSecondsSyntax() {
+            return "select extract(epoch from now())::integer";
         }
 
         @Override
@@ -95,8 +136,8 @@ public enum RDBDocumentStoreDB {
             } catch (SQLException ex) {
                 LOG.debug("while getting diagnostics", ex);
             } finally {
-                ch.closeResultSet(rs);
-                ch.closeStatement(stmt);
+                closeResultSet(rs);
+                closeStatement(stmt);
                 ch.closeConnection(con);
             }
             return result.toString();
@@ -107,6 +148,26 @@ public enum RDBDocumentStoreDB {
         @Override
         public String checkVersion(DatabaseMetaData md) throws SQLException {
             return RDBJDBCTools.versionCheck(md, 10, 1, description);
+        }
+
+        @Override
+        public String getCurrentTimeStampInSecondsSyntax() {
+            return "select cast (days(current_timestamp - current_timezone) - days('1970-01-01') as integer) * 86400 + midnight_seconds(current_timestamp - current_timezone) from sysibm.sysdummy1";
+        }
+
+        public String getTableCreationStatement(String tableName) {
+            return "create table " + tableName
+                    + " (ID varchar(512) not null, MODIFIED bigint, HASBINARY smallint, DELETEDONCE smallint, MODCOUNT bigint, CMODCOUNT bigint, DSIZE bigint, DATA varchar(16384), BDATA blob("
+                    + 1024 * 1024 * 1024 + "))";
+        }
+
+        public List<String> getIndexCreationStatements(String tableName) {
+            List<String> statements = new ArrayList<String>();
+            String pkName = tableName + "_pk";
+            statements.add("create unique index " + pkName + " on " + tableName + " ( ID ) cluster");
+            statements.add("alter table " + tableName + " add constraint " + pkName + " primary key ( ID )");
+            statements.addAll(super.getIndexCreationStatements(tableName));
+            return statements;
         }
 
         @Override
@@ -146,8 +207,8 @@ public enum RDBDocumentStoreDB {
             } catch (SQLException ex) {
                 LOG.debug("while getting diagnostics", ex);
             } finally {
-                ch.closeResultSet(rs);
-                ch.closeStatement(stmt);
+                closeResultSet(rs);
+                closeStatement(stmt);
                 ch.closeConnection(con);
             }
             return result.toString();
@@ -157,7 +218,12 @@ public enum RDBDocumentStoreDB {
     ORACLE("Oracle") {
         @Override
         public String checkVersion(DatabaseMetaData md) throws SQLException {
-            return RDBJDBCTools.versionCheck(md, 12, 1, description);
+            return RDBJDBCTools.versionCheck(md, 12, 1, 12, 1, description);
+        }
+
+        @Override
+        public String getCurrentTimeStampInSecondsSyntax() {
+            return "select (trunc(sys_extract_utc(systimestamp)) - to_date('01/01/1970', 'MM/DD/YYYY')) * 24 * 60 * 60 + to_number(to_char(sys_extract_utc(systimestamp), 'SSSSS')) from dual";
         }
 
         @Override
@@ -192,8 +258,8 @@ public enum RDBDocumentStoreDB {
             } catch (SQLException ex) {
                 LOG.debug("while getting diagnostics", ex);
             } finally {
-                ch.closeResultSet(rs);
-                ch.closeStatement(stmt);
+                closeResultSet(rs);
+                closeStatement(stmt);
                 ch.closeConnection(con);
             }
             return result.toString();
@@ -204,6 +270,11 @@ public enum RDBDocumentStoreDB {
         @Override
         public String checkVersion(DatabaseMetaData md) throws SQLException {
             return RDBJDBCTools.versionCheck(md, 5, 5, description);
+        }
+
+        @Override
+        public String getCurrentTimeStampInSecondsSyntax() {
+            return "select unix_timestamp()";
         }
 
         @Override
@@ -218,9 +289,22 @@ public enum RDBDocumentStoreDB {
         }
 
         @Override
-        public String getConcatQueryString(int dataOctetLimit, int dataLength) {
-            return "CONCAT(DATA, ?)";
+        public PreparedStatementComponent getConcatQuery(final String appendData, final int dataOctetLimit) {
+            return new PreparedStatementComponent() {
+
+                @Override
+                public String getStatementComponent() {
+                    return "CONCAT(DATA, ?)";
+                }
+
+                @Override
+                public int setParameters(PreparedStatement stmt, int startIndex) throws SQLException {
+                    stmt.setString(startIndex++, appendData);
+                    return startIndex;
+                }
+            };
         }
+
         @Override
         public String getAdditionalDiagnostics(RDBConnectionHandler ch, String tableName) {
             Connection con = null;
@@ -248,8 +332,8 @@ public enum RDBDocumentStoreDB {
             } catch (SQLException ex) {
                 LOG.debug("while getting diagnostics", ex);
             } finally {
-                ch.closeResultSet(rs);
-                ch.closeStatement(stmt);
+                closeResultSet(rs);
+                closeStatement(stmt);
                 ch.closeConnection(con);
             }
             return result.toString();
@@ -274,19 +358,28 @@ public enum RDBDocumentStoreDB {
         }
 
         @Override
-        public String getConcatQueryString(int dataOctetLimit, int dataLength) {
-            /*
-             * To avoid truncation when concatenating force an error when limit
-             * is above the octet limit
-             */
-            return "CASE WHEN LEN(DATA) <= " + (dataOctetLimit - dataLength) + " THEN (DATA + CAST(? AS nvarchar(" + dataOctetLimit
-                    + "))) ELSE (DATA + CAST(DATA AS nvarchar(max))) END";
+        public PreparedStatementComponent getConcatQuery(final String appendData, final int dataOctetLimit) {
+            return new PreparedStatementComponent() {
 
+                @Override
+                // this statement ensures that SQL server will generate an exception on overflow
+                public String getStatementComponent() {
+                    return "CASE WHEN LEN(DATA) < ? THEN (DATA + CAST(? AS nvarchar(" + dataOctetLimit
+                            + "))) ELSE (DATA + CAST(DATA AS nvarchar(max))) END";
+                }
+
+                @Override
+                public int setParameters(PreparedStatement stmt, int startIndex) throws SQLException {
+                    stmt.setInt(startIndex++, dataOctetLimit - appendData.length());
+                    stmt.setString(startIndex++, appendData);
+                    return startIndex;
+                }
+            };
         }
 
         @Override
-        public String getCurrentTimeStampInMsSyntax() {
-            return "CURRENT_TIMESTAMP";
+        public String getCurrentTimeStampInSecondsSyntax() {
+            return "select datediff(second, dateadd(second, datediff(second, getutcdate(), getdate()), '1970-01-01'), getdate())";
         }
 
         @Override
@@ -309,8 +402,8 @@ public enum RDBDocumentStoreDB {
             } catch (SQLException ex) {
                 LOG.debug("while getting diagnostics", ex);
             } finally {
-                ch.closeResultSet(rs);
-                ch.closeStatement(stmt);
+                closeResultSet(rs);
+                closeStatement(stmt);
                 ch.closeConnection(con);
             }
             return result.toString();
@@ -349,25 +442,39 @@ public enum RDBDocumentStoreDB {
     }
 
     /**
-     * Query syntax for current time in ms
+     * Query syntax for current time in ms since the epoch
+     * 
+     * @return the query syntax or empty string when no such syntax is available
      */
-    public String getCurrentTimeStampInMsSyntax() {
-        return "CURRENT_TIMESTAMP(4)";
+    public String getCurrentTimeStampInSecondsSyntax() {
+        // unfortunately, we don't have a portable statement for this
+        return "";
     }
 
     /**
      * Returns the CONCAT function or its equivalent function or sub-query. Note
      * that the function MUST NOT cause a truncated value to be written!
      *
+     * @param appendData
+     *            string to be inserted
      * @param dataOctetLimit
      *            expected capacity of data column
-     * @param dataLength
-     *            length of string to be inserted
-     * 
-     * @return the concat query string
      */
-    public String getConcatQueryString(int dataOctetLimit, int dataLength) {
-        return "DATA || CAST(? AS varchar(" + dataOctetLimit + "))";
+    public PreparedStatementComponent getConcatQuery(final String appendData, final int dataOctetLimit) {
+
+        return new PreparedStatementComponent() {
+
+            @Override
+            public String getStatementComponent() {
+                return "DATA || CAST(? AS varchar(" + dataOctetLimit + "))";
+            }
+
+            @Override
+            public int setParameters(PreparedStatement stmt, int startIndex) throws SQLException {
+                stmt.setString(startIndex++, appendData);
+                return startIndex;
+            }
+        };
     }
 
     /**

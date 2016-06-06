@@ -27,6 +27,7 @@ import org.slf4j.LoggerFactory;
 import com.google.common.io.Closer;
 
 import javax.sql.DataSource;
+import java.io.Closeable;
 
 public class JdbcFactory implements NodeStoreFactory {
 
@@ -53,6 +54,9 @@ public class JdbcFactory implements NodeStoreFactory {
     @Override
     public NodeStore create(BlobStore blobStore, Closer closer) {
         DataSource ds = RDBDataSourceFactory.forJdbcUrl(jdbcUri, user, password);
+        if (ds instanceof Closeable) {
+            closer.register((Closeable)ds);
+        }
         DocumentMK.Builder builder = MongoFactory.getBuilder(cacheSize);
         if (blobStore != null) {
             builder.setBlobStore(blobStore);

@@ -24,6 +24,7 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Random;
@@ -51,6 +52,7 @@ import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
 import org.apache.commons.io.FileUtils;
 import org.apache.jackrabbit.oak.commons.IOUtils;
+import org.apache.jackrabbit.oak.plugins.index.IndexConstants;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.apache.lucene.store.Directory;
@@ -59,7 +61,7 @@ import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.store.RAMDirectory;
-import org.junit.Ignore;
+import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -69,6 +71,8 @@ import static com.google.common.collect.Sets.newHashSet;
 import static com.google.common.util.concurrent.MoreExecutors.sameThreadExecutor;
 import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.REINDEX_COUNT;
 import static org.apache.jackrabbit.oak.plugins.nodetype.write.InitialContent.INITIAL_CONTENT;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -87,6 +91,11 @@ public class IndexCopierTest {
     public TemporaryFolder temporaryFolder = new TemporaryFolder();
 
     private NodeBuilder builder = root.builder();
+
+    @Before
+    public void setUp(){
+        builder.setProperty(IndexConstants.INDEX_PATH, "/oak:index/test");
+    }
 
     @Test
     public void basicTest() throws Exception{
@@ -116,7 +125,14 @@ public class IndexCopierTest {
 
     @Test
     public void basicTestWithPrefetch() throws Exception{
-        Directory baseDir = new RAMDirectory();
+        final List<String> syncedFiles = Lists.newArrayList();
+        Directory baseDir = new RAMDirectory(){
+            @Override
+            public void sync(Collection<String> names) throws IOException {
+                syncedFiles.addAll(names);
+                super.sync(names);
+            }
+        };
         IndexDefinition defn = new IndexDefinition(root, builder.getNodeState());
         IndexCopier c1 = new RAMIndexCopier(baseDir, sameThreadExecutor(), getWorkDir(), true);
 
@@ -127,6 +143,7 @@ public class IndexCopierTest {
 
         Directory wrapped = c1.wrapForRead("/foo", defn, remote);
         assertEquals(2, wrapped.listAll().length);
+        assertThat(syncedFiles, containsInAnyOrder("t1", "t2"));
 
         assertTrue(wrapped.fileExists("t1"));
         assertTrue(wrapped.fileExists("t2"));
@@ -553,7 +570,7 @@ public class IndexCopierTest {
 
         IndexCopier copier = new IndexCopier(sameThreadExecutor(), getWorkDir());
 
-        builder.setProperty(LuceneIndexConstants.INDEX_PATH, "foo");
+        builder.setProperty(IndexConstants.INDEX_PATH, "foo");
         IndexDefinition defn = new IndexDefinition(root, builder.getNodeState());
         Directory dir = copier.wrapForWrite(defn, remote, false);
 
@@ -927,7 +944,7 @@ public class IndexCopierTest {
 
         Directory baseDir = new CloseSafeDir();
         String indexPath = "/foo";
-        builder.setProperty(LuceneIndexConstants.INDEX_PATH, indexPath);
+        builder.setProperty(IndexConstants.INDEX_PATH, indexPath);
         IndexDefinition defn = new IndexDefinition(root, builder.getNodeState());
         IndexCopier copier = new RAMIndexCopier(baseDir, executor, getWorkDir(), true);
 
@@ -999,6 +1016,7 @@ public class IndexCopierTest {
         byte[] result = new byte[(int)wrapped.fileLength(fileName)];
         i.readBytes(result, 0, result.length);
         assertTrue(Arrays.equals(expectedData, result));
+        i.close();
     }
 
     private static void copy(Directory source, Directory dest) throws IOException {

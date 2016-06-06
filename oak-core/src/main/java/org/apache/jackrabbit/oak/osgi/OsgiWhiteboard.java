@@ -75,10 +75,16 @@ public class OsgiWhiteboard implements Whiteboard {
         final ServiceRegistration registration =
                 context.registerService(type.getName(), service, dictionary);
         return new Registration() {
+            private volatile boolean unregistered;
             @Override
             public void unregister() {
                 try {
-                    registration.unregister();
+                    if (!unregistered) {
+                        registration.unregister();
+                        unregistered = true;
+                    } else {
+                        log.warn("Service {} of type {} unregistered multiple times", service, type);
+                    }
                 } catch (IllegalStateException ex) {
                     log.warn("Error unregistering service: {} of type {}",
                             service, type.getName(), ex);

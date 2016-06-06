@@ -138,6 +138,9 @@ public final class ConfigurationParameters implements Map<String, Object> {
         if (map.isEmpty()) {
             return EMPTY;
         }
+        if (map instanceof ConfigurationParameters) {
+            return (ConfigurationParameters) map;
+        }
         Map<String, Object> options = new HashMap<String, Object>(map.size());
         for (Map.Entry<?,?> e : map.entrySet()) {
             options.put(String.valueOf(e.getKey()), e.getValue());
@@ -450,6 +453,7 @@ public final class ConfigurationParameters implements Map<String, Object> {
 
         /**
          * Parses a value string into a duration. the String has the following format:
+         * {@code
          * <xmp>
          *     format:= (value [ unit ])+;
          *     value:= float value;
@@ -462,6 +466,7 @@ public final class ConfigurationParameters implements Map<String, Object> {
          *     "1s 50ms": 1050 milliseconds
          *     "1.5d":  1 1/2 days == 36 hours.
          * </xmp>
+         * }
          *
          * @param str the string to parse
          * @return the new Milliseconds object or null.

@@ -21,7 +21,6 @@ package org.apache.jackrabbit.oak.jcr;
 
 import static java.io.File.createTempFile;
 import static org.apache.jackrabbit.oak.plugins.segment.compaction.CompactionStrategy.CleanupType.CLEAN_NONE;
-import static org.apache.jackrabbit.oak.plugins.segment.file.FileStore.newFileStore;
 import static org.junit.Assert.assertTrue;
 
 import java.io.File;
@@ -89,12 +88,12 @@ public class RefreshOnGCTest {
             }
         };
         strategy.setPersistCompactionMap(usePersistedMap);
-        fileStore = newFileStore(directory)
+        fileStore = FileStore.builder(directory)
                 .withGCMonitor(gcMonitor)
-                .create()
+                .build()
                 .setCompactionStrategy(strategy);
 
-        NodeStore nodeStore = new SegmentNodeStore(fileStore);
+        NodeStore nodeStore = SegmentNodeStore.builder(fileStore).build();
         Oak oak = new Oak(nodeStore);
         oak.with(whiteboard);
         repository = new Jcr(oak).createRepository();
@@ -109,7 +108,7 @@ public class RefreshOnGCTest {
     }
 
     @Test
-    public void compactionCausesRefresh() throws RepositoryException, InterruptedException, ExecutionException {
+    public void compactionCausesRefresh() throws RepositoryException, InterruptedException, ExecutionException, IOException {
         Session session = repository.login(new SimpleCredentials("admin", "admin".toCharArray()));
         try {
             Node root = session.getRootNode();

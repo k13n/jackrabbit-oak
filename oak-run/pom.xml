@@ -23,7 +23,7 @@
   <parent>
     <groupId>org.apache.jackrabbit</groupId>
     <artifactId>oak-parent</artifactId>
-    <version>1.4-SNAPSHOT</version>
+    <version>1.6-SNAPSHOT</version>
     <relativePath>../oak-parent/pom.xml</relativePath>
   </parent>
 
@@ -232,6 +232,16 @@
   <dependencies>
     <dependency>
       <groupId>org.apache.jackrabbit</groupId>
+      <artifactId>oak-segment</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.jackrabbit</groupId>
+      <artifactId>oak-segment-tar</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.jackrabbit</groupId>
       <artifactId>oak-jcr</artifactId>
       <version>${project.version}</version>
     </dependency>
@@ -240,11 +250,16 @@
       <artifactId>oak-http</artifactId>
       <version>${project.version}</version>
     </dependency>
-      <dependency>
+    <dependency>
         <groupId>org.apache.jackrabbit</groupId>
         <artifactId>oak-remote</artifactId>
         <version>${project.version}</version>
-      </dependency>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.jackrabbit</groupId>
+      <artifactId>oak-authorization-cug</artifactId>
+      <version>${project.version}</version>
+    </dependency>
     <dependency>
       <groupId>org.apache.jackrabbit</groupId>
       <artifactId>oak-lucene</artifactId>
@@ -274,6 +289,11 @@
     <dependency>
       <groupId>org.apache.jackrabbit</groupId>
       <artifactId>oak-tarmk-standby</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.jackrabbit</groupId>
+      <artifactId>oak-auth-external</artifactId>
       <version>${project.version}</version>
     </dependency>
     <dependency>
@@ -362,9 +382,15 @@
       <scope>compile</scope>
     </dependency>
     <dependency>
-      <groupId>com.google.code.gson</groupId>
-      <artifactId>gson</artifactId>
-      <version>2.2.4</version>
+      <groupId>com.googlecode.json-simple</groupId>
+      <artifactId>json-simple</artifactId>
+      <version>1.1.1</version>
+      <exclusions>
+        <exclusion>
+          <artifactId>junit</artifactId>
+          <groupId>junit</groupId>
+        </exclusion>
+      </exclusions>
     </dependency>
 
     <dependency>
@@ -381,6 +407,25 @@
       <groupId>org.apache.commons</groupId>
       <artifactId>commons-csv</artifactId>
       <version>1.1</version>
+    </dependency>
+
+    <dependency>
+      <groupId>io.dropwizard.metrics</groupId>
+      <artifactId>metrics-core</artifactId>
+      <version>3.1.0</version>
+    </dependency>
+
+    <dependency>
+      <groupId>org.apache.jackrabbit</groupId>
+      <artifactId>jackrabbit-aws-ext</artifactId>
+      <version>${jackrabbit.version}</version>
+      <optional>true</optional>
+    </dependency>
+
+    <dependency>
+      <groupId>org.apache.sling</groupId>
+      <artifactId>org.apache.sling.testing.osgi-mock</artifactId>
+      <scope>compile</scope>
     </dependency>
 
     <!-- Findbugs annotations -->
@@ -443,6 +488,11 @@
         <dependency>
           <groupId>org.apache.lucene</groupId>
           <artifactId>lucene-suggest</artifactId>
+          <version>${lucene.version}</version>
+        </dependency>
+        <dependency>
+          <groupId>org.apache.lucene</groupId>
+          <artifactId>lucene-facet</artifactId>
           <version>${lucene.version}</version>
         </dependency>
         <dependency>

@@ -18,6 +18,17 @@
  */
 package org.apache.jackrabbit.oak.plugins.segment.standby.client;
 
+import java.io.Closeable;
+import java.lang.management.ManagementFactory;
+import java.util.UUID;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import javax.management.MBeanServer;
+import javax.management.ObjectName;
+import javax.management.StandardMBean;
+import javax.net.ssl.SSLException;
+
 import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelInitializer;
@@ -33,15 +44,6 @@ import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import io.netty.handler.timeout.ReadTimeoutHandler;
 import io.netty.util.CharsetUtil;
-import io.netty.util.concurrent.DefaultEventExecutorGroup;
-import io.netty.util.concurrent.EventExecutorGroup;
-
-import java.io.Closeable;
-import java.lang.management.ManagementFactory;
-import java.util.UUID;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-
 import org.apache.jackrabbit.oak.plugins.segment.SegmentStore;
 import org.apache.jackrabbit.oak.plugins.segment.standby.codec.RecordIdDecoder;
 import org.apache.jackrabbit.oak.plugins.segment.standby.jmx.ClientStandbyStatusMBean;
@@ -50,11 +52,6 @@ import org.apache.jackrabbit.oak.plugins.segment.standby.store.CommunicationObse
 import org.apache.jackrabbit.oak.plugins.segment.standby.store.StandbyStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import javax.management.MBeanServer;
-import javax.management.ObjectName;
-import javax.management.StandardMBean;
-import javax.net.ssl.SSLException;
 
 public final class StandbyClient implements ClientStandbyStatusMBean, Runnable, Closeable {
     public static final String CLIENT_ID_PROPERTY_NAME = "standbyID";
@@ -71,7 +68,6 @@ public final class StandbyClient implements ClientStandbyStatusMBean, Runnable, 
     private final CommunicationObserver observer;
     private StandbyClientHandler handler;
     private EventLoopGroup group;
-    private EventExecutorGroup executor;
     private SslContext sslContext;
     private boolean active = false;
     private int failedRequests;
@@ -83,15 +79,6 @@ public final class StandbyClient implements ClientStandbyStatusMBean, Runnable, 
 
     private long syncStartTimestamp;
     private long syncEndTimestamp;
-
-    public StandbyClient(String host, int port, SegmentStore store) throws SSLException {
-        this(host, port, store, false, 10000);
-    }
-
-    public StandbyClient(String host, int port, SegmentStore store,
-            boolean secure, int readTimeoutMs) throws SSLException {
-        this(host, port, store, secure, readTimeoutMs, false);
-    }
 
     public StandbyClient(String host, int port, SegmentStore store,
             boolean secure, int readTimeoutMs, boolean autoClean)
@@ -152,7 +139,6 @@ public final class StandbyClient implements ClientStandbyStatusMBean, Runnable, 
                 return;
             }
             state = STATUS_STARTING;
-            executor = new DefaultEventExecutorGroup(4);
             handler = new StandbyClientHandler(this.store, observer, running,
                     readTimeoutMs, autoClean);
             group = new NioEventLoopGroup();
@@ -172,13 +158,12 @@ public final class StandbyClient implements ClientStandbyStatusMBean, Runnable, 
                     if (sslContext != null) {
                         p.addLast(sslContext.newHandler(ch.alloc()));
                     }
-                    // WriteTimeoutHandler & ReadTimeoutHandler
                     p.addLast("readTimeoutHandler", new ReadTimeoutHandler(
                             readTimeoutMs, TimeUnit.MILLISECONDS));
                     p.addLast(new StringEncoder(CharsetUtil.UTF_8));
                     p.addLast(new SnappyFramedDecoder(true));
                     p.addLast(new RecordIdDecoder(store));
-                    p.addLast(executor, handler);
+                    p.addLast(handler);
                 }
             });
             state = STATUS_RUNNING;
@@ -207,17 +192,13 @@ public final class StandbyClient implements ClientStandbyStatusMBean, Runnable, 
     }
 
     private void shutdownNetty() {
-        if (group != null && !group.isShuttingDown()) {
-            group.shutdownGracefully(1, 1, TimeUnit.SECONDS)
-                    .syncUninterruptibly();
-        }
-        if (executor != null && !executor.isShuttingDown()) {
-            executor.shutdownGracefully(1, 1, TimeUnit.SECONDS)
-                    .syncUninterruptibly();
-        }
         if (handler != null) {
             handler.close();
             handler = null;
+        }
+        if (group != null && !group.isShuttingDown()) {
+            group.shutdownGracefully(0, 1, TimeUnit.SECONDS).syncUninterruptibly();
+            group = null;
         }
     }
 

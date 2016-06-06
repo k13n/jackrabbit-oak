@@ -26,11 +26,13 @@ import static com.google.common.collect.Maps.newHashMap;
 import static com.google.common.collect.Sets.newHashSet;
 import static com.google.common.collect.Sets.union;
 import static org.apache.jackrabbit.JcrConstants.JCR_SYSTEM;
+import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.REINDEX_PROPERTY_NAME;
 import static org.apache.jackrabbit.oak.plugins.name.Namespaces.addCustomMapping;
 import static org.apache.jackrabbit.oak.plugins.nodetype.NodeTypeConstants.NODE_TYPES_PATH;
 import static org.apache.jackrabbit.oak.spi.security.privilege.PrivilegeConstants.JCR_ALL;
 import static org.apache.jackrabbit.oak.upgrade.nodestate.FilteringNodeState.ALL;
 import static org.apache.jackrabbit.oak.upgrade.nodestate.FilteringNodeState.NONE;
+import static org.apache.jackrabbit.oak.upgrade.nodestate.NodeStateCopier.copyProperties;
 
 import java.io.File;
 import java.io.IOException;
@@ -61,6 +63,7 @@ import com.google.common.base.Stopwatch;
 import com.google.common.collect.HashBiMap;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
 import org.apache.jackrabbit.api.security.authorization.PrivilegeManager;
 import org.apache.jackrabbit.core.RepositoryContext;
@@ -74,13 +77,17 @@ import org.apache.jackrabbit.core.nodetype.NodeTypeRegistry;
 import org.apache.jackrabbit.core.security.authorization.PrivilegeRegistry;
 import org.apache.jackrabbit.core.security.user.UserManagerImpl;
 import org.apache.jackrabbit.oak.api.CommitFailedException;
+import org.apache.jackrabbit.oak.api.PropertyState;
 import org.apache.jackrabbit.oak.api.Root;
 import org.apache.jackrabbit.oak.api.Tree;
+import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.namepath.NamePathMapper;
 import org.apache.jackrabbit.oak.plugins.index.CompositeIndexEditorProvider;
 import org.apache.jackrabbit.oak.plugins.index.IndexEditorProvider;
 import org.apache.jackrabbit.oak.plugins.index.IndexUpdate;
 import org.apache.jackrabbit.oak.plugins.index.IndexUpdateCallback;
+import org.apache.jackrabbit.oak.plugins.index.IndexUtils;
+import org.apache.jackrabbit.oak.plugins.index.counter.NodeCounterEditorProvider;
 import org.apache.jackrabbit.oak.plugins.index.property.PropertyIndexEditorProvider;
 import org.apache.jackrabbit.oak.plugins.index.reference.ReferenceEditorProvider;
 import org.apache.jackrabbit.oak.plugins.name.NamespaceConstants;
@@ -108,6 +115,7 @@ import org.apache.jackrabbit.oak.spi.security.user.UserConstants;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
+import org.apache.jackrabbit.oak.upgrade.nodestate.NameFilteringNodeState;
 import org.apache.jackrabbit.oak.upgrade.nodestate.report.LoggingReporter;
 import org.apache.jackrabbit.oak.upgrade.nodestate.report.ReportingNodeState;
 import org.apache.jackrabbit.oak.upgrade.nodestate.NodeStateCopier;
@@ -115,6 +123,7 @@ import org.apache.jackrabbit.oak.upgrade.security.GroupEditorProvider;
 import org.apache.jackrabbit.oak.upgrade.security.RestrictionEditorProvider;
 import org.apache.jackrabbit.oak.upgrade.version.VersionCopyConfiguration;
 import org.apache.jackrabbit.oak.upgrade.version.VersionableEditor;
+import org.apache.jackrabbit.oak.upgrade.version.VersionablePropertiesEditor;
 import org.apache.jackrabbit.spi.Name;
 import org.apache.jackrabbit.spi.QNodeDefinition;
 import org.apache.jackrabbit.spi.QNodeTypeDefinition;
@@ -132,6 +141,8 @@ import static org.apache.jackrabbit.oak.upgrade.version.VersionCopier.copyVersio
 public class RepositoryUpgrade {
 
     private static final Logger logger = LoggerFactory.getLogger(RepositoryUpgrade.class);
+
+    private static final Set<String> INDEXES_TO_REBUILD = ImmutableSet.of("counter");
 
     public static final Set<String> DEFAULT_INCLUDE_PATHS = ALL;
 
@@ -174,6 +185,10 @@ public class RepositoryUpgrade {
     private boolean earlyShutdown = false;
 
     private List<CommitHook> customCommitHooks = null;
+
+    private boolean skipLongNames = true;
+
+    private boolean skipInitialization = false;
 
     VersionCopyConfiguration versionCopyConfiguration = new VersionCopyConfiguration();
 
@@ -243,6 +258,22 @@ public class RepositoryUpgrade {
 
     public void setEarlyShutdown(boolean earlyShutdown) {
         this.earlyShutdown = earlyShutdown;
+    }
+
+    public boolean isSkipLongNames() {
+        return skipLongNames;
+    }
+
+    public void setSkipLongNames(boolean skipLongNames) {
+        this.skipLongNames = skipLongNames;
+    }
+
+    public boolean isSkipInitialization() {
+        return skipInitialization;
+    }
+
+    public void setSkipInitialization(boolean skipInitialization) {
+        this.skipInitialization = skipInitialization;
     }
 
     /**
@@ -356,23 +387,27 @@ public class RepositoryUpgrade {
             SecurityProviderImpl security = new SecurityProviderImpl(
                     mapSecurityConfig(config.getSecurityConfig()));
 
-            // init target repository first
-            logger.info("Initializing initial repository content from {}", config.getHomeDir());
-            new InitialContent().initialize(targetBuilder);
-            if (initializer != null) {
-                initializer.initialize(targetBuilder);
-            }
-            logger.debug("InitialContent completed from {}", config.getHomeDir());
+            if (skipInitialization) {
+                logger.info("Skipping the repository initialization");
+            } else {
+                // init target repository first
+                logger.info("Initializing initial repository content from {}", config.getHomeDir());
+                new InitialContent().initialize(targetBuilder);
+                if (initializer != null) {
+                    initializer.initialize(targetBuilder);
+                }
+                logger.debug("InitialContent completed from {}", config.getHomeDir());
 
-            for (SecurityConfiguration sc : security.getConfigurations()) {
-                RepositoryInitializer ri = sc.getRepositoryInitializer();
-                ri.initialize(targetBuilder);
-                logger.debug("Repository initializer '" + ri.getClass().getName() + "' completed", config.getHomeDir());
-            }
-            for (SecurityConfiguration sc : security.getConfigurations()) {
-                WorkspaceInitializer wi = sc.getWorkspaceInitializer();
-                wi.initialize(targetBuilder, workspaceName);
-                logger.debug("Workspace initializer '" + wi.getClass().getName() + "' completed", config.getHomeDir());
+                for (SecurityConfiguration sc : security.getConfigurations()) {
+                    RepositoryInitializer ri = sc.getRepositoryInitializer();
+                    ri.initialize(targetBuilder);
+                    logger.debug("Repository initializer '" + ri.getClass().getName() + "' completed", config.getHomeDir());
+                }
+                for (SecurityConfiguration sc : security.getConfigurations()) {
+                    WorkspaceInitializer wi = sc.getWorkspaceInitializer();
+                    wi.initialize(targetBuilder, workspaceName);
+                    logger.debug("Workspace initializer '" + wi.getClass().getName() + "' completed", config.getHomeDir());
+                }
             }
 
             HashBiMap<String, String> uriToPrefix = HashBiMap.create();
@@ -380,40 +415,50 @@ public class RepositoryUpgrade {
             copyNamespaces(targetBuilder, uriToPrefix);
             logger.debug("Namespace registration completed.");
 
-            logger.info("Copying registered node types");
-            NodeTypeManager ntMgr = new ReadWriteNodeTypeManager() {
-                @Override
-                protected Tree getTypes() {
-                    return upgradeRoot.getTree(NODE_TYPES_PATH);
-                }
+            if (skipInitialization) {
+                logger.info("Skipping registering node types and privileges");
+            } else {
+                logger.info("Copying registered node types");
+                NodeTypeManager ntMgr = new ReadWriteNodeTypeManager() {
+                    @Override
+                    protected Tree getTypes() {
+                        return upgradeRoot.getTree(NODE_TYPES_PATH);
+                    }
 
-                @Nonnull
-                @Override
-                protected Root getWriteRoot() {
-                    return upgradeRoot;
-                }
-            };
-            copyNodeTypes(ntMgr, new ValueFactoryImpl(upgradeRoot, NamePathMapper.DEFAULT));
-            logger.debug("Node type registration completed.");
+                    @Nonnull
+                    @Override
+                    protected Root getWriteRoot() {
+                        return upgradeRoot;
+                    }
+                };
+                copyNodeTypes(ntMgr, new ValueFactoryImpl(upgradeRoot, NamePathMapper.DEFAULT));
+                logger.debug("Node type registration completed.");
 
-            // migrate privileges
-            logger.info("Copying registered privileges");
-            PrivilegeConfiguration privilegeConfiguration = security.getConfiguration(PrivilegeConfiguration.class);
-            copyCustomPrivileges(privilegeConfiguration.getPrivilegeManager(upgradeRoot, NamePathMapper.DEFAULT));
-            logger.debug("Privilege registration completed.");
+                // migrate privileges
+                logger.info("Copying registered privileges");
+                PrivilegeConfiguration privilegeConfiguration = security.getConfiguration(PrivilegeConfiguration.class);
+                copyCustomPrivileges(privilegeConfiguration.getPrivilegeManager(upgradeRoot, NamePathMapper.DEFAULT));
+                logger.debug("Privilege registration completed.");
 
-            // Triggers compilation of type information, which we need for
-            // the type predicates used by the bulk  copy operations below.
-            new TypeEditorProvider(false).getRootEditor(
-                    targetBuilder.getBaseState(), targetBuilder.getNodeState(), targetBuilder, null);
+                // Triggers compilation of type information, which we need for
+                // the type predicates used by the bulk  copy operations below.
+                new TypeEditorProvider(false).getRootEditor(
+                        targetBuilder.getBaseState(), targetBuilder.getNodeState(), targetBuilder, null);
+            }
 
-            final NodeState sourceRoot = ReportingNodeState.wrap(
+            final NodeState reportingSourceRoot = ReportingNodeState.wrap(
                     JackrabbitNodeState.createRootNodeState(
                             source, workspaceName, targetBuilder.getNodeState(), 
                             uriToPrefix, copyBinariesByReference, skipOnError
                     ),
                     new LoggingReporter(logger, "Migrating", 10000, -1)
             );
+            final NodeState sourceRoot;
+            if (skipLongNames) {
+                sourceRoot = NameFilteringNodeState.wrap(reportingSourceRoot);
+            } else {
+                sourceRoot = reportingSourceRoot;
+            }
 
             final Stopwatch watch = Stopwatch.createStarted();
 
@@ -448,8 +493,13 @@ public class RepositoryUpgrade {
                     new RestrictionEditorProvider(),
                     new GroupEditorProvider(groupsPath),
                     // copy referenced version histories
-                    new VersionableEditor.Provider(sourceRoot, workspaceName, versionCopyConfiguration)
+                    new VersionableEditor.Provider(sourceRoot, workspaceName, versionCopyConfiguration),
+                    new SameNameSiblingsEditor.Provider()
             )));
+
+            // this editor works on the VersionableEditor output, so it can't be
+            // a part of the same EditorHook
+            hooks.add(new EditorHook(new VersionablePropertiesEditor.Provider()));
 
             // security-related hooks
             for (SecurityConfiguration sc : security.getConfigurations()) {
@@ -459,6 +509,8 @@ public class RepositoryUpgrade {
             if (customCommitHooks != null) {
                 hooks.addAll(customCommitHooks);
             }
+
+            markIndexesToBeRebuilt(targetBuilder);
 
             // type validation, reference and indexing hooks
             hooks.add(new EditorHook(new CompositeEditorProvider(
@@ -471,6 +523,21 @@ public class RepositoryUpgrade {
             logger.debug("Repository upgrade completed.");
         } catch (Exception e) {
             throw new RepositoryException("Failed to copy content", e);
+        }
+    }
+
+    static void markIndexesToBeRebuilt(NodeBuilder targetRoot) {
+        NodeBuilder oakIndex = IndexUtils.getOrCreateOakIndex(targetRoot);
+        for (String indexName : INDEXES_TO_REBUILD) {
+            final NodeBuilder indexDef = oakIndex.getChildNode(indexName);
+            if (!indexDef.exists()) {
+                continue;
+            }
+            final PropertyState reindex = indexDef.getProperty(REINDEX_PROPERTY_NAME);
+            logger.info("Marking {} to be reindexed", indexName);
+            if (reindex == null || !reindex.getValue(Type.BOOLEAN)) {
+                indexDef.setProperty(REINDEX_PROPERTY_NAME, true);
+            }
         }
     }
 
@@ -851,6 +918,10 @@ public class RepositoryUpgrade {
                 .exclude(excludes)
                 .merge(merges)
                 .copy(sourceRoot, targetRoot);
+
+        if (includePaths.contains("/")) {
+            copyProperties(sourceRoot, targetRoot);
+        }
 
         return workspaceName;
     }

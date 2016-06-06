@@ -41,6 +41,7 @@ import org.junit.rules.TestRule;
 
 import static java.util.Collections.synchronizedList;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
@@ -185,15 +186,15 @@ public class JournalTest extends AbstractJournalTest {
         JournalGarbageCollector gc = new JournalGarbageCollector(ns1);
         // first clean up
         Thread.sleep(100); // OAK-2979 : wait 100ms before doing the cleanup
-        gc.gc(1, TimeUnit.MILLISECONDS);
+        gc.gc(1, 100, TimeUnit.MILLISECONDS);
         Thread.sleep(100); // sleep just quickly
-        assertEquals(0, gc.gc(1, TimeUnit.DAYS));
-        assertEquals(0, gc.gc(6, TimeUnit.HOURS));
-        assertEquals(0, gc.gc(1, TimeUnit.HOURS));
-        assertEquals(0, gc.gc(10, TimeUnit.MINUTES));
-        assertEquals(0, gc.gc(1, TimeUnit.MINUTES));
-        assertEquals(0, gc.gc(1, TimeUnit.SECONDS));
-        assertEquals(0, gc.gc(1, TimeUnit.MILLISECONDS));
+        assertEquals(0, gc.gc(1, 100, TimeUnit.DAYS));
+        assertEquals(0, gc.gc(6, 100, TimeUnit.HOURS));
+        assertEquals(0, gc.gc(1, 100, TimeUnit.HOURS));
+        assertEquals(0, gc.gc(10, 100, TimeUnit.MINUTES));
+        assertEquals(0, gc.gc(1, 100, TimeUnit.MINUTES));
+        assertEquals(0, gc.gc(1, 100, TimeUnit.SECONDS));
+        assertEquals(0, gc.gc(1, 100, TimeUnit.MILLISECONDS));
         
         // create some entries that can be deleted thereupon
         mk1.commit("/", "+\"regular1\": {}", null, null);
@@ -201,16 +202,16 @@ public class JournalTest extends AbstractJournalTest {
         mk1.commit("/", "+\"regular3\": {}", null, null);
         mk1.commit("/regular2", "+\"regular4\": {}", null, null);
         Thread.sleep(100); // sleep 100millis
-        assertEquals(0, gc.gc(5, TimeUnit.SECONDS));
-        assertEquals(0, gc.gc(1, TimeUnit.MILLISECONDS));
+        assertEquals(0, gc.gc(5, 100, TimeUnit.SECONDS));
+        assertEquals(0, gc.gc(1, 100, TimeUnit.MILLISECONDS));
         ns1.runBackgroundOperations();
         mk1.commit("/", "+\"regular5\": {}", null, null);
         ns1.runBackgroundOperations();
         mk1.commit("/", "+\"regular6\": {}", null, null);
         ns1.runBackgroundOperations();
         Thread.sleep(100); // sleep 100millis
-        assertEquals(0, gc.gc(5, TimeUnit.SECONDS));
-        assertEquals(3, gc.gc(1, TimeUnit.MILLISECONDS));
+        assertEquals(0, gc.gc(5, 100, TimeUnit.SECONDS));
+        assertEquals(3, gc.gc(1, 100, TimeUnit.MILLISECONDS));
     }
     
     @Test
@@ -327,10 +328,10 @@ public class JournalTest extends AbstractJournalTest {
     }
     
     private void doLastRevRecoveryJournalTest(boolean testConcurrency) throws Exception {
-        DocumentMK mk1 = createMK(0 /*clusterId via clusterNodes collection*/, 0);
+        DocumentMK mk1 = createMK(1, 0);
         DocumentNodeStore ds1 = mk1.getNodeStore();
         int c1Id = ds1.getClusterId();
-        DocumentMK mk2 = createMK(0 /*clusterId via clusterNodes collection*/, 0);
+        DocumentMK mk2 = createMK(2, 0);
         DocumentNodeStore ds2 = mk2.getNodeStore();
         final int c2Id = ds2.getClusterId();
         
@@ -371,7 +372,7 @@ public class JournalTest extends AbstractJournalTest {
         Revision zlastRev2 = z1.getLastRev().get(c2Id);
         // /x/y/z is a new node and does not have a _lastRev
         assertNull(zlastRev2);
-        Revision head2 = ds2.getHeadRevision();
+        Revision head2 = ds2.getHeadRevision().getRevision(ds2.getClusterId());
 
         //lastRev should not be updated for C #2
         assertNull(y1.getLastRev().get(c2Id));
@@ -458,7 +459,8 @@ public class JournalTest extends AbstractJournalTest {
         NodeBuilder b2 = ns2.getRoot().builder();
         b2.child("bar");
         ns2.merge(b2, EmptyHook.INSTANCE, CommitInfo.EMPTY);
-        Revision h2 = ns2.getHeadRevision();
+        Revision h2 = ns2.getHeadRevision().getRevision(ns2.getClusterId());
+        assertNotNull(h2);
 
         ns2.runBackgroundReadOperations();
 

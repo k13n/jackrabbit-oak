@@ -23,7 +23,7 @@
   <parent>
     <groupId>org.apache.jackrabbit</groupId>
     <artifactId>oak-parent</artifactId>
-    <version>1.4-SNAPSHOT</version>
+    <version>1.6-SNAPSHOT</version>
     <relativePath>oak-parent/pom.xml</relativePath>
   </parent>
 
@@ -57,6 +57,9 @@
     <module>oak-remote</module>
     <module>oak-exercise</module>
     <module>oak-examples</module>
+    <module>oak-it</module>
+    <module>oak-segment</module>
+    <module>oak-segment-tar</module>
   </modules>
 
   <scm>
@@ -80,7 +83,6 @@
             <exclude>oak-doc/.*/**</exclude>
             <exclude>oak-doc/*.iml</exclude>
             <exclude>oak-doc/target/**</exclude>
-            <exclude>oak-js/package.json</exclude>
           </excludes>
         </configuration>
       </plugin>

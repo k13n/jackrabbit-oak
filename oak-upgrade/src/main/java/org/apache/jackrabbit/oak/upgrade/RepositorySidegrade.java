@@ -35,6 +35,7 @@ import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
 import org.apache.jackrabbit.oak.upgrade.RepositoryUpgrade.LoggingCompositeHook;
+import org.apache.jackrabbit.oak.upgrade.nodestate.NameFilteringNodeState;
 import org.apache.jackrabbit.oak.upgrade.nodestate.report.LoggingReporter;
 import org.apache.jackrabbit.oak.upgrade.nodestate.report.ReportingNodeState;
 import org.apache.jackrabbit.oak.upgrade.nodestate.NodeStateCopier;
@@ -51,6 +52,8 @@ import static org.apache.jackrabbit.oak.upgrade.RepositoryUpgrade.DEFAULT_EXCLUD
 import static org.apache.jackrabbit.oak.upgrade.RepositoryUpgrade.DEFAULT_INCLUDE_PATHS;
 import static org.apache.jackrabbit.oak.upgrade.RepositoryUpgrade.DEFAULT_MERGE_PATHS;
 import static org.apache.jackrabbit.oak.upgrade.RepositoryUpgrade.calculateEffectiveIncludePaths;
+import static org.apache.jackrabbit.oak.upgrade.RepositoryUpgrade.markIndexesToBeRebuilt;
+import static org.apache.jackrabbit.oak.upgrade.nodestate.NodeStateCopier.copyProperties;
 import static org.apache.jackrabbit.oak.upgrade.version.VersionCopier.copyVersionStorage;
 
 public class RepositorySidegrade {
@@ -78,6 +81,10 @@ public class RepositorySidegrade {
      * Paths to merge during the copy process. Empty by default.
      */
     private Set<String> mergePaths = DEFAULT_MERGE_PATHS;
+
+    private boolean skipLongNames = true;
+
+    private boolean skipInitialization = false;
 
     private List<CommitHook> customCommitHooks = null;
 
@@ -182,6 +189,24 @@ public class RepositorySidegrade {
         this.mergePaths = copyOf(checkNotNull(merges));
     }
 
+    public boolean isSkipLongNames() {
+        return skipLongNames;
+    }
+
+    public void setSkipLongNames(boolean skipLongNames) {
+        this.skipLongNames = skipLongNames;
+    }
+
+    /**
+     * Skip the new repository initialization. Only copy content passed in the
+     * {@link #includePaths}.
+     *
+     * @param skipInitialization
+     */
+    public void setSkipInitialization(boolean skipInitialization) {
+        this.skipInitialization = skipInitialization;
+    }
+
     /**
      * Same as {@link #copy(RepositoryInitializer)}, but with no custom initializer. 
      */
@@ -205,18 +230,25 @@ public class RepositorySidegrade {
      */
     public void copy(RepositoryInitializer initializer) throws RepositoryException {
         try {
-            NodeState sourceRoot = source.getRoot();
             NodeBuilder targetRoot = target.getRoot().builder();
 
-            new InitialContent().initialize(targetRoot);
-            if (initializer != null) {
-                initializer.initialize(targetRoot);
+            if (skipInitialization) {
+                LOG.info("Skipping the repository initialization");
+            } else {
+                new InitialContent().initialize(targetRoot);
+                if (initializer != null) {
+                    initializer.initialize(targetRoot);
+                }
             }
 
-            copyState(
-                    ReportingNodeState.wrap(sourceRoot, new LoggingReporter(LOG, "Copying", 10000, -1)),
-                    targetRoot
-            );
+            final NodeState reportingSourceRoot = ReportingNodeState.wrap(source.getRoot(), new LoggingReporter(LOG, "Copying", 10000, -1));
+            final NodeState sourceRoot;
+            if (skipLongNames) {
+                sourceRoot = NameFilteringNodeState.wrap(reportingSourceRoot);
+            } else {
+                sourceRoot = reportingSourceRoot;
+            }
+            copyState(sourceRoot, targetRoot);
 
         } catch (Exception e) {
             throw new RepositoryException("Failed to copy content", e);
@@ -244,6 +276,7 @@ public class RepositorySidegrade {
             hooks.addAll(customCommitHooks);
         }
 
+        markIndexesToBeRebuilt(targetRoot);
 
         target.merge(targetRoot, new LoggingCompositeHook(hooks, null, false), CommitInfo.EMPTY);
     }
@@ -258,5 +291,9 @@ public class RepositorySidegrade {
             .exclude(excludes)
             .merge(merges)
             .copy(sourceRoot, targetRoot);
+
+        if (includePaths.contains("/")) {
+            copyProperties(sourceRoot, targetRoot);
+        }
     }
 }

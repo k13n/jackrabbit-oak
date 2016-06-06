@@ -68,6 +68,23 @@ public class BasicDocumentStoreTest extends AbstractDocumentStoreTest {
     }
 
     @Test
+    public void testAddAndRemoveJournalEntry() {
+        // OAK-4021
+        String id = this.getClass().getName() + ".testAddAndRemoveJournalEntry";
+
+        // remove if present
+        Document d = super.ds.find(Collection.JOURNAL, id);
+        if (d != null) {
+            super.ds.remove(Collection.JOURNAL, id);
+        }
+
+        // add
+        UpdateOp up = new UpdateOp(id, true);
+        up.set("_id", id);
+        assertTrue(super.ds.create(Collection.JOURNAL, Collections.singletonList(up)));
+    }
+
+    @Test
     public void testConditionalUpdate() {
         String id = this.getClass().getName() + ".testConditionalUpdate";
 
@@ -181,6 +198,66 @@ public class BasicDocumentStoreTest extends AbstractDocumentStoreTest {
     }
 
     @Test
+    public void testConditionalUpdateForbidden() {
+        String id = this.getClass().getName() + ".testConditionalupdateForbidden";
+
+        // remove if present
+        NodeDocument nd = super.ds.find(Collection.NODES, id);
+        if (nd != null) {
+            super.ds.remove(Collection.NODES, id);
+        }
+
+        try {
+            UpdateOp up = new UpdateOp(id, true);
+            up.set("_id", id);
+            up.equals("foo", "bar");
+            super.ds.create(Collection.NODES, Collections.singletonList(up));
+            fail("conditional create should fail");
+        }
+        catch (IllegalStateException expected) {
+            // reported by UpdateOp
+        }
+
+        UpdateOp cup = new UpdateOp(id, true);
+        cup.set("_id", id);
+        assertTrue(super.ds.create(Collection.NODES, Collections.singletonList(cup)));
+        removeMe.add(id);
+
+        try {
+            UpdateOp up = new UpdateOp(id, false);
+            up.set("_id", id);
+            up.equals("foo", "bar");
+            super.ds.createOrUpdate(Collection.NODES, up);
+            fail("conditional createOrUpdate should fail");
+        }
+        catch (IllegalArgumentException expected) {
+            // reported by DocumentStore
+        }
+
+        try {
+            UpdateOp up = new UpdateOp(id, false);
+            up.set("_id", id);
+            up.equals("foo", "bar");
+            super.ds.createOrUpdate(Collection.NODES, Collections.singletonList(up));
+            fail("conditional createOrUpdate should fail");
+        }
+        catch (IllegalArgumentException expected) {
+            // reported by DocumentStore
+        }
+
+        try {
+            UpdateOp up = new UpdateOp(id, false);
+            up.set("_id", id);
+            up.equals("foo", "bar");
+            super.ds.update(Collection.NODES, Collections.singletonList(id), up);
+            fail("conditional update should fail");
+        }
+        catch (IllegalArgumentException expected) {
+            // reported by DocumentStore
+        }
+    }
+
+    @Test
     public void testMaxIdAscii() {
         int result = testMaxId(true);
         assertTrue("needs to support keys of 512 bytes length, but only supports " + result, result >= 512);
@@ -189,6 +266,18 @@ public class BasicDocumentStoreTest extends AbstractDocumentStoreTest {
     @Test
     public void testMaxIdNonAscii() {
         testMaxId(false);
+    }
+
+    @Test
+    public void testLongId() {
+        String id = "0:/" + generateId(2048, true);
+        assertNull("find() with ultra-long id needs to return 'null'", super.ds.find(Collection.NODES, id));
+
+        if (! super.dsname.contains("Memory")) {
+            UpdateOp up = new UpdateOp(id,  true);
+            up.set("_id", id);
+            assertFalse("create() with ultra-long id needs to fail", super.ds.create(Collection.NODES, Collections.singletonList(up)));
+        }
     }
 
     private int testMaxId(boolean ascii) {
@@ -298,6 +387,36 @@ public class BasicDocumentStoreTest extends AbstractDocumentStoreTest {
     }
 
     @Test
+    public void testRepeatingUpdatesOnSQLServer() {
+        // simulates two updates to trigger the off-by-one bug documented in OAK-3670
+        String id = this.getClass().getName() + ".testRepeatingUpdatesOnSQLServer";
+
+        // remove if present
+        NodeDocument nd = super.ds.find(Collection.NODES, id);
+        if (nd != null) {
+            super.ds.remove(Collection.NODES, id);
+        }
+
+        UpdateOp up = new UpdateOp(id, true);
+        up.set("_id", id);
+        assertTrue(super.ds.create(Collection.NODES, Collections.singletonList(up)));
+        removeMe.add(id);
+
+        up = new UpdateOp(id, false);
+        up.set("_id", id);
+        up.set("f0", generateConstantString(3000));
+        super.ds.update(Collection.NODES, Collections.singletonList(id), up);
+
+        up = new UpdateOp(id, false);
+        up.set("_id", id);
+        up.set("f1", generateConstantString(967));
+        super.ds.update(Collection.NODES, Collections.singletonList(id), up);
+
+        NodeDocument doc = super.ds.find(Collection.NODES, id, 0);
+        assertNotNull(doc);
+    }
+
+    @Test
     public void testModifiedMaxUpdateQuery() {
         String id = this.getClass().getName() + ".testModifiedMaxUpdate";
         // create a test node
@@ -321,6 +440,89 @@ public class BasicDocumentStoreTest extends AbstractDocumentStoreTest {
         String endId = this.getClass().getName() + ".testModifiedMaxUpdatf";
         List<NodeDocument> results = super.ds.query(Collection.NODES, startId, endId, "_modified", 1000, 1);
         assertEquals("document not found, maybe indexed _modified property not properly updated", 1, results.size());
+    }
+
+    @Test
+    public void testModifiedMaxUpdateQuery2() {
+        // test for https://issues.apache.org/jira/browse/OAK-4388
+        String id = this.getClass().getName() + ".testModifiedMaxUpdate2";
+        // create a test node
+        UpdateOp up = new UpdateOp(id, true);
+        up.set("_id", id);
+        up.set("_modified", 1000L);
+        boolean success = super.ds.create(Collection.NODES, Collections.singletonList(up));
+        assertTrue(success);
+        removeMe.add(id);
+
+        for (int i = 0; i < 25; i++) {
+            // update with smaller _modified
+            UpdateOp up2 = new UpdateOp(id, true);
+            up2.set("_id", id);
+            up2.max("_modified", 100L);
+            super.ds.findAndUpdate(Collection.NODES, up2);
+            super.ds.invalidateCache();
+            NodeDocument doc = super.ds.find(Collection.NODES, id, 0);
+            assertEquals("modified should not have been set back (test iteration " + i + ")", 1000, (long)doc.getModified());
+        }
+    }
+
+    @Test
+    public void testModifyModified() {
+        // https://issues.apache.org/jira/browse/OAK-2940
+        String id = this.getClass().getName() + ".testModifyModified";
+        // create a test node
+        UpdateOp up = new UpdateOp(id, true);
+        up.set("_id", id);
+        up.set("_modified", 1000L);
+        boolean success = super.ds.create(Collection.NODES, Collections.singletonList(up));
+        assertTrue(success);
+        removeMe.add(id);
+
+        // update with "max" operation
+        up = new UpdateOp(id, false);
+        up.set("_id", id);
+        up.max("_modified", 2000L);
+        super.ds.update(Collection.NODES, Collections.singletonList(id), up);
+        NodeDocument nd = super.ds.find(Collection.NODES, id, 0);
+        assertEquals(((Number)nd.get("_modified")).longValue(), 2000L);
+
+        // update with "set" operation
+        up = new UpdateOp(id, false);
+        up.set("_id", id);
+        up.set("_modified", 1500L);
+        super.ds.update(Collection.NODES, Collections.singletonList(id), up);
+        nd = super.ds.find(Collection.NODES, id, 0);
+        assertEquals(((Number)nd.get("_modified")).longValue(), 1500L);
+    }
+
+    @Test
+    public void testModifyDeletedOnce() {
+        // https://issues.apache.org/jira/browse/OAK-3852
+        String id = this.getClass().getName() + ".testModifyDeletedOnce";
+        // create a test node
+        UpdateOp up = new UpdateOp(id, true);
+        up.set("_id", id);
+        up.set(NodeDocument.DELETED_ONCE, Boolean.FALSE);
+        boolean success = super.ds.create(Collection.NODES, Collections.singletonList(up));
+        assertTrue(success);
+        removeMe.add(id);
+        NodeDocument nd = super.ds.find(Collection.NODES, id, 0);
+        assertNotNull(nd);
+        Boolean dovalue = (Boolean)nd.get(NodeDocument.DELETED_ONCE);
+        if (dovalue != null) {
+            // RDB persistence does not distinguish null and false
+            assertEquals(dovalue.booleanValue(), Boolean.FALSE);
+        }
+
+        // update
+        up = new UpdateOp(id, false);
+        up.set("_id", id);
+        up.set(NodeDocument.DELETED_ONCE, Boolean.TRUE);
+        super.ds.update(Collection.NODES, Collections.singletonList(id), up);
+        nd = super.ds.find(Collection.NODES, id, 0);
+        assertNotNull(nd);
+        assertNotNull(nd.get(NodeDocument.DELETED_ONCE));
+        assertEquals(((Boolean)nd.get(NodeDocument.DELETED_ONCE)).booleanValue(), Boolean.TRUE);
     }
 
     @Test
@@ -715,6 +917,12 @@ public class BasicDocumentStoreTest extends AbstractDocumentStoreTest {
 
     @Test
     public void removeWithCondition() throws Exception {
+
+        Set<String> existingDocs = new HashSet<String>();
+        for (NodeDocument doc : Utils.getAllDocuments(ds)) {
+            existingDocs.add(doc.getPath());
+        }
+
         List<UpdateOp> docs = Lists.newArrayList();
         docs.add(newDocument("/foo", 100));
         removeMe.add(Utils.getIdFromPath("/foo"));
@@ -739,10 +947,29 @@ public class BasicDocumentStoreTest extends AbstractDocumentStoreTest {
         assertEquals(2, removed);
         assertNotNull(ds.find(Collection.NODES, Utils.getIdFromPath("/bar")));
         for (NodeDocument doc : Utils.getAllDocuments(ds)) {
-            if (!doc.getPath().equals("/bar")) {
+            if (!doc.getPath().equals("/bar") && !existingDocs.contains(doc.getPath())) {
                 fail("document must not exist: " + doc.getId());
             }
         }
+    }
+
+    @Test
+    public void removeInvalidatesCache() throws Exception {
+        String id = Utils.getIdFromPath("/foo");
+        removeMe.add(id);
+        ds.create(Collection.NODES, Collections.singletonList(newDocument("/foo", 1)));
+
+        Map<Key, Condition> conditions = Collections.emptyMap();
+        ds.remove(Collection.NODES, Collections.singletonMap(id, conditions));
+        assertNull(ds.getIfCached(Collection.NODES, id));
+    }
+
+    // OAK-3932
+    @Test
+    public void getIfCachedNonExistingDocument() throws Exception {
+        String id = Utils.getIdFromPath("/foo");
+        assertNull(ds.find(Collection.NODES, id));
+        assertNull(ds.getIfCached(Collection.NODES, id));
     }
 
     private UpdateOp newDocument(String path, long modified) {

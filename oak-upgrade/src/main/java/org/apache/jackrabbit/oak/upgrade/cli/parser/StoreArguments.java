@@ -34,6 +34,8 @@ import org.slf4j.LoggerFactory;
 
 import static org.apache.jackrabbit.oak.upgrade.cli.parser.OptionParserFactory.SRC_FBS;
 import static org.apache.jackrabbit.oak.upgrade.cli.parser.OptionParserFactory.SRC_FDS;
+import static org.apache.jackrabbit.oak.upgrade.cli.parser.OptionParserFactory.SRC_S3;
+import static org.apache.jackrabbit.oak.upgrade.cli.parser.OptionParserFactory.SRC_S3_CONFIG;
 import static org.apache.jackrabbit.oak.upgrade.cli.parser.OptionParserFactory.DST_FBS;
 import static org.apache.jackrabbit.oak.upgrade.cli.parser.OptionParserFactory.DST_FDS;
 import static org.apache.jackrabbit.oak.upgrade.cli.parser.OptionParserFactory.DST_S3;
@@ -50,6 +52,8 @@ public class StoreArguments {
     private static final String DEFAULT_CRX2_REPO = "crx-quickstart/repository";
 
     private static final String REPOSITORY_XML = "repository.xml";
+
+    public static final String SEGMENT_OLD_PREFIX = "segment-old:";
 
     private static final Logger log = LoggerFactory.getLogger(StoreArguments.class);
 
@@ -83,15 +87,18 @@ public class StoreArguments {
         return dst.getFactory(MigrationDirection.DST, parser);
     }
 
-    public BlobStoreFactory getSrcBlobStore() {
+    public BlobStoreFactory getSrcBlobStore() throws IOException {
         BlobStoreFactory factory;
         if (parser.hasOption(SRC_FBS)) {
             factory = new FileBlobStoreFactory(parser.getOption(SRC_FBS));
+        } else if (parser.hasOption(SRC_S3_CONFIG) && parser.hasOption(SRC_S3)) {
+            factory = new S3DataStoreFactory(parser.getOption(SRC_S3_CONFIG), parser.getOption(SRC_S3));
         } else if (parser.hasOption(SRC_FDS)) {
             factory = new FileDataStoreFactory(parser.getOption(SRC_FDS));
         } else {
             factory = new DummyBlobStoreFactory();
         }
+        log.info("Source blob store: {}", factory);
         return factory;
     }
 
@@ -106,6 +113,7 @@ public class StoreArguments {
         } else {
             factory = new DummyBlobStoreFactory();
         }
+        log.info("Destination blob store: {}", factory);
         return factory;
     }
 
@@ -114,6 +122,10 @@ public class StoreArguments {
             return src.getPath().equals(dst.getPath());
         }
         return false;
+    }
+
+    public boolean isSkipLongNames() {
+        return dst.getType() != SEGMENT;
     }
 
     public String[] getSrcPaths() {

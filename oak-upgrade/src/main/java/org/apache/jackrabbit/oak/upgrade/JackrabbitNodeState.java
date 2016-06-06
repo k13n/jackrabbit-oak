@@ -55,6 +55,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 import javax.jcr.Binary;
 import javax.jcr.PropertyType;
@@ -62,6 +63,7 @@ import javax.jcr.RepositoryException;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Lists;
 import org.apache.jackrabbit.api.ReferenceBinary;
 import org.apache.jackrabbit.core.RepositoryContext;
 import org.apache.jackrabbit.core.id.NodeId;
@@ -287,22 +289,12 @@ class JackrabbitNodeState extends AbstractNodeState {
     @Override
     public NodeState getChildNode(@Nonnull String name) {
         NodeId id = nodes.get(name);
+        NodeState state = null;
         if (id != null) {
-            try {
-                return createChildNodeState(id, name);
-            } catch (ItemStateException e) {
-                if (!skipOnError) {
-                    throw new IllegalStateException(
-                            "Unable to access child node " + name, e);
-                }
-                warn("Skipping broken child node entry " + name + " and changing the primary type to nt:unstructured", e);
-                properties.put(JCR_PRIMARYTYPE, PropertyStates.createProperty(
-                        JCR_PRIMARYTYPE, NT_UNSTRUCTURED, Type.NAME));
-
-            }
+            state = createChildNodeState(id, name);
         }
         checkValidName(name);
-        return EmptyNodeState.MISSING_NODE;
+        return state != null ? state : EmptyNodeState.MISSING_NODE;
     }
 
     @Override
@@ -313,14 +305,12 @@ class JackrabbitNodeState extends AbstractNodeState {
     @Nonnull
     @Override
     public Iterable<MemoryChildNodeEntry> getChildNodeEntries() {
-        List<MemoryChildNodeEntry> entries = newArrayList();
+        List<MemoryChildNodeEntry> entries = newArrayListWithCapacity(nodes.size());
         for (Map.Entry<String, NodeId> entry : nodes.entrySet()) {
             String name = entry.getKey();
-            try {
-                final JackrabbitNodeState child = createChildNodeState(entry.getValue(), name);
+            final NodeState child = createChildNodeState(entry.getValue(), name);
+            if (child != null) {
                 entries.add(new MemoryChildNodeEntry(name, child));
-            } catch (ItemStateException e) {
-                warn("Skipping broken child node entry " + name, e);
             }
         }
         return entries;
@@ -334,7 +324,8 @@ class JackrabbitNodeState extends AbstractNodeState {
 
     //-----------------------------------------------------------< private >--
 
-    private JackrabbitNodeState createChildNodeState(NodeId id, String name) throws ItemStateException {
+    @CheckForNull
+    private JackrabbitNodeState createChildNodeState(NodeId id, String name) {
         if (mountPoints.containsKey(id)) {
             final JackrabbitNodeState nodeState = mountPoints.get(id);
             checkState(name.equals(nodeState.name),
@@ -346,10 +337,25 @@ class JackrabbitNodeState extends AbstractNodeState {
 
         JackrabbitNodeState state = nodeStateCache.get(id);
         if (state == null) {
-            state = new JackrabbitNodeState(this, name, loader.loadBundle(id));
-            nodeStateCache.put(id, state);
+            try {
+                state = new JackrabbitNodeState(this, name, loader.loadBundle(id));
+                nodeStateCache.put(id, state);
+            } catch (ItemStateException e) {
+                handleBundleLoadingException(name, e);
+            } catch (NullPointerException e) {
+                handleBundleLoadingException(name, e);
+            }
         }
         return state;
+    }
+
+    private void handleBundleLoadingException(final @Nonnull String name, final Exception e) {
+        if (!skipOnError) {
+            throw new IllegalStateException("Unable to access child node " + name + " of " + getPath(), e);
+        }
+        warn("Skipping broken child node entry " + name + " and changing the primary type to nt:unstructured", e);
+        properties.put(JCR_PRIMARYTYPE, PropertyStates.createProperty(
+                JCR_PRIMARYTYPE, NT_UNSTRUCTURED, Type.NAME));
     }
 
     private void setChildOrder() {
@@ -388,23 +394,6 @@ class JackrabbitNodeState extends AbstractNodeState {
         properties.put(JCR_PRIMARYTYPE, PropertyStates.createProperty(
                 JCR_PRIMARYTYPE, primary, Type.NAME));
 
-        Set<String> mixins = newLinkedHashSet();
-        if (bundle.getMixinTypeNames() != null) {
-            for (Name mixin : bundle.getMixinTypeNames()) {
-                mixins.add(createName(mixin));
-            }
-        }
-        if (!mixins.isEmpty()) {
-            properties.put(JCR_MIXINTYPES, PropertyStates.createProperty(
-                    JCR_MIXINTYPES, mixins, Type.NAMES));
-        }
-
-        if (bundle.isReferenceable()
-                || isReferenceable.apply(primary, mixins)) {
-            properties.put(JCR_UUID, PropertyStates.createProperty(
-                    JCR_UUID, bundle.getId().toString()));
-        }
-
         for (PropertyEntry property : bundle.getPropertyEntries()) {
             String name = createName(property.getName());
             try {
@@ -419,6 +408,28 @@ class JackrabbitNodeState extends AbstractNodeState {
             } catch (Exception e) {
                 warn("Skipping broken property entry " + name, e);
             }
+        }
+
+        Set<String> mixins = newLinkedHashSet();
+        if (bundle.getMixinTypeNames() != null) {
+            for (Name mixin : bundle.getMixinTypeNames()) {
+                mixins.add(createName(mixin));
+            }
+        }
+
+        if (mixins.remove("mix:simpleVersionable")) {
+            mixins.add(MIX_VERSIONABLE);
+        }
+
+        if (!mixins.isEmpty()) {
+            properties.put(JCR_MIXINTYPES, PropertyStates.createProperty(
+                    JCR_MIXINTYPES, mixins, Type.NAMES));
+        }
+
+        if (bundle.isReferenceable()
+                || isReferenceable.apply(primary, mixins)) {
+            properties.put(JCR_UUID, PropertyStates.createProperty(
+                    JCR_UUID, bundle.getId().toString()));
         }
 
         return properties;

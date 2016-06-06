@@ -106,7 +106,7 @@ public class Cursors {
      * returned cursor guarantees distinct rows.
      *
      * @param c the cursor to wrap.
-     * @param level the ancestor level. Must be >= 1.
+     * @param level the ancestor level. Must be {@code >= 1}.
      * @return cursor over the ancestors of <code>c</code> at <code>level</code>.
      */
     public static Cursor newAncestorCursor(Cursor c, int level, QueryEngineSettings settings) {
@@ -241,6 +241,12 @@ public class Cursors {
             NodeState parent = null;
             NodeState node = rootState;
             
+            if (filter.containsNativeConstraint()) {
+                // OAK-4313: if no other index was found,
+                // then, for native queries, we won't match anything
+                return;
+            }
+
             if (filter.isAlwaysFalse()) {
                 // nothing can match this filter, leave nodes empty
                 return;

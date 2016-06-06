@@ -16,11 +16,8 @@
  */
 package org.apache.jackrabbit.oak.plugins.index.lucene;
 
-import static org.apache.jackrabbit.oak.commons.IOUtils.humanReadableByteCount;
-import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.PERSISTENCE_PATH;
-import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.VERSION;
-import static org.apache.lucene.store.NoLockFactory.getNoLockFactory;
-
+import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
@@ -31,21 +28,22 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
-import javax.annotation.Nullable;
-
 import org.apache.commons.io.IOUtils;
 import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.api.PropertyState;
 import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.plugins.index.IndexUpdateCallback;
+import org.apache.jackrabbit.oak.plugins.index.lucene.util.FacetHelper;
 import org.apache.jackrabbit.oak.plugins.index.lucene.util.SuggestHelper;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
+import org.apache.jackrabbit.oak.stats.Clock;
 import org.apache.jackrabbit.oak.util.PerfLogger;
 import org.apache.jackrabbit.util.ISO8601;
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.analysis.miscellaneous.PerFieldAnalyzerWrapper;
 import org.apache.lucene.analysis.shingle.ShingleAnalyzerWrapper;
+import org.apache.lucene.facet.FacetsConfig;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
@@ -60,6 +58,12 @@ import org.apache.tika.parser.Parser;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import static com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.jackrabbit.oak.commons.IOUtils.humanReadableByteCount;
+import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.PERSISTENCE_PATH;
+import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.VERSION;
+import static org.apache.lucene.store.NoLockFactory.getNoLockFactory;
+
 public class LuceneIndexEditorContext {
 
     private static final Logger log = LoggerFactory
@@ -67,6 +71,8 @@ public class LuceneIndexEditorContext {
 
     private static final PerfLogger PERF_LOGGER =
             new PerfLogger(LoggerFactory.getLogger(LuceneIndexEditorContext.class.getName() + ".perf"));
+
+    private final FacetsConfig facetsConfig;
 
     static IndexWriterConfig getIndexWriterConfig(IndexDefinition definition, boolean remoteDir) {
         // FIXME: Hack needed to make Lucene work in an OSGi environment
@@ -77,6 +83,9 @@ public class LuceneIndexEditorContext {
             Analyzer definitionAnalyzer = definition.getAnalyzer();
             Map<String, Analyzer> analyzers = new HashMap<String, Analyzer>();
             analyzers.put(FieldNames.SPELLCHECK, new ShingleAnalyzerWrapper(LuceneIndexConstants.ANALYZER, 3));
+            if (!definition.isSuggestAnalyzed()) {
+                analyzers.put(FieldNames.SUGGEST, SuggestHelper.getAnalyzer());
+            }
             Analyzer analyzer = new PerFieldAnalyzerWrapper(definitionAnalyzer, analyzers);
             IndexWriterConfig config = new IndexWriterConfig(VERSION, analyzer);
             if (remoteDir) {
@@ -117,7 +126,7 @@ public class LuceneIndexEditorContext {
 
     private static final Parser defaultParser = createDefaultParser();
 
-    private final IndexDefinition definition;
+    private IndexDefinition definition;
 
     private final NodeBuilder definitionBuilder;
 
@@ -134,28 +143,39 @@ public class LuceneIndexEditorContext {
     @Nullable
     private final IndexCopier indexCopier;
 
-
     private Directory directory;
 
     private final TextExtractionStats textExtractionStats = new TextExtractionStats();
 
     private final ExtractedTextCache extractedTextCache;
+
+    private final IndexAugmentorFactory augmentorFactory;
+
+    private final NodeState root;
     /**
      * The media types supported by the parser used.
      */
     private Set<MediaType> supportedMediaTypes;
 
+    //Intentionally static, so that it can be set without passing around clock objects
+    //Set for testing ONLY
+    private static Clock clock = Clock.SIMPLE;
+
     LuceneIndexEditorContext(NodeState root, NodeBuilder definition, IndexUpdateCallback updateCallback,
-                             @Nullable IndexCopier indexCopier, ExtractedTextCache extractedTextCache) {
+                             @Nullable IndexCopier indexCopier, ExtractedTextCache extractedTextCache,
+                             IndexAugmentorFactory augmentorFactory) {
+        this.root = root;
         this.definitionBuilder = definition;
         this.indexCopier = indexCopier;
         this.definition = new IndexDefinition(root, definition);
         this.indexedNodes = 0;
         this.updateCallback = updateCallback;
         this.extractedTextCache = extractedTextCache;
+        this.augmentorFactory = augmentorFactory;
         if (this.definition.isOfOldFormat()){
             IndexDefinition.updateDefinition(definition);
         }
+        this.facetsConfig = FacetHelper.getFacetsConfig(definition);
     }
 
     Parser getParser() {
@@ -182,6 +202,37 @@ public class LuceneIndexEditorContext {
         return writer;
     }
 
+    private static void trackIndexSizeInfo(@Nonnull IndexWriter writer,
+                                           @Nonnull IndexDefinition definition,
+                                           @Nonnull Directory directory) throws IOException {
+        checkNotNull(writer);
+        checkNotNull(definition);
+        checkNotNull(directory);
+
+        int docs = writer.numDocs();
+        int ram = writer.numRamDocs();
+
+        log.trace("Writer for direcory {} - docs: {}, ramDocs: {}", definition, docs, ram);
+
+        String[] files = directory.listAll();
+        long overallSize = 0;
+        StringBuilder sb = new StringBuilder();
+        for (String f : files) {
+            sb.append(f).append(":");
+            if (directory.fileExists(f)) {
+                long size = directory.fileLength(f);
+                overallSize += size;
+                sb.append(size);
+            } else {
+                sb.append("--");
+            }
+            sb.append(", ");
+        }
+        log.trace("Directory overall size: {}, files: {}",
+            org.apache.jackrabbit.oak.commons.IOUtils.humanReadableByteCount(overallSize),
+            sb.toString());
+    }
+
     /**
      * close writer if it's not null
      */
@@ -194,21 +245,42 @@ public class LuceneIndexEditorContext {
             getWriter();
         }
 
+        boolean updateSuggestions = shouldUpdateSuggestions();
+        if (writer == null && updateSuggestions) {
+            log.debug("Would update suggester dictionary although no index changes were detected in current cycle");
+            getWriter();
+        }
+
         if (writer != null) {
+            if (log.isTraceEnabled()) {
+                trackIndexSizeInfo(writer, definition, directory);
+            }
+
             final long start = PERF_LOGGER.start();
-            updateSuggester();
+
+            Calendar lastUpdated = null;
+            if (updateSuggestions) {
+                lastUpdated = updateSuggester(writer.getAnalyzer());
+                PERF_LOGGER.end(start, -1, "Completed suggester for directory {}", definition);
+            }
+            if (lastUpdated == null) {
+                lastUpdated = getCalendar();
+            }
 
             writer.close();
+            PERF_LOGGER.end(start, -1, "Closed writer for directory {}", definition);
 
             directory.close();
+            PERF_LOGGER.end(start, -1, "Closed directory for directory {}", definition);
 
             //OAK-2029 Record the last updated status so
             //as to make IndexTracker detect changes when index
             //is stored in file system
             NodeBuilder status = definitionBuilder.child(":status");
-            status.setProperty("lastUpdated", ISO8601.format(Calendar.getInstance()), Type.DATE);
-            status.setProperty("indexedNodes",indexedNodes);
-            PERF_LOGGER.end(start, -1, "Closed IndexWriter for directory {}", definition);
+            status.setProperty("lastUpdated", ISO8601.format(lastUpdated), Type.DATE);
+            status.setProperty("indexedNodes", indexedNodes);
+
+            PERF_LOGGER.end(start, -1, "Overall Closed IndexWriter for directory {}", definition);
 
             textExtractionStats.log(reindex);
             textExtractionStats.collectStats(extractedTextCache);
@@ -218,43 +290,92 @@ public class LuceneIndexEditorContext {
     /**
      * eventually update suggest dictionary
      * @throws IOException if suggest dictionary update fails
+     * @param analyzer the analyzer used to update the suggester
+     * @return {@link Calendar} object representing the lastUpdated value written by suggestions
      */
-    private void updateSuggester() throws IOException {
+    private Calendar updateSuggester(Analyzer analyzer) throws IOException {
+        Calendar ret = null;
+        NodeBuilder suggesterStatus = definitionBuilder.child(":suggesterStatus");
+        DirectoryReader reader = DirectoryReader.open(writer, false);
+        final OakDirectory suggestDirectory = new OakDirectory(definitionBuilder, ":suggest-data", definition, false);
+        try {
+            SuggestHelper.updateSuggester(suggestDirectory, analyzer, reader);
+            ret = getCalendar();
+            suggesterStatus.setProperty("lastUpdated", ISO8601.format(ret), Type.DATE);
+        } catch (Throwable e) {
+            log.warn("could not update suggester", e);
+        } finally {
+            suggestDirectory.close();
+            reader.close();
+        }
+
+        return ret;
+    }
+
+    /**
+     * Checks if last suggestion build time was done sufficiently in the past AND that there were non-zero indexedNodes
+     * stored in the last run. Note, if index is updated only to rebuild suggestions, even then we update indexedNodes,
+     * which would be zero in case it was a forced update of suggestions.
+     * @return is suggest dict should be updated
+     */
+    private boolean shouldUpdateSuggestions() {
+        boolean updateSuggestions = false;
 
         if (definition.isSuggestEnabled()) {
-
-            boolean updateSuggester = false;
             NodeBuilder suggesterStatus = definitionBuilder.child(":suggesterStatus");
-            if (suggesterStatus.hasProperty("lastUpdated")) {
-                PropertyState suggesterLastUpdatedValue = suggesterStatus.getProperty("lastUpdated");
+
+            PropertyState suggesterLastUpdatedValue = suggesterStatus.getProperty("lastUpdated");
+
+            if (suggesterLastUpdatedValue != null) {
                 Calendar suggesterLastUpdatedTime = ISO8601.parse(suggesterLastUpdatedValue.getValue(Type.DATE));
+
                 int updateFrequency = definition.getSuggesterUpdateFrequencyMinutes();
-                suggesterLastUpdatedTime.add(Calendar.MINUTE, updateFrequency);
-                if (Calendar.getInstance().after(suggesterLastUpdatedTime)) {
-                    updateSuggester = true;
+                Calendar nextSuggestUpdateTime = (Calendar)suggesterLastUpdatedTime.clone();
+                nextSuggestUpdateTime.add(Calendar.MINUTE, updateFrequency);
+                if (getCalendar().after(nextSuggestUpdateTime)) {
+                    updateSuggestions = (writer != null || isIndexUpdatedAfter(suggesterLastUpdatedTime));
                 }
             } else {
-                updateSuggester = true;
-            }
-
-            if (updateSuggester) {
-                DirectoryReader reader = DirectoryReader.open(writer, false);
-                try {
-                    SuggestHelper.updateSuggester(reader);
-                    suggesterStatus.setProperty("lastUpdated", ISO8601.format(Calendar.getInstance()), Type.DATE);
-                } catch (Throwable e) {
-                    log.warn("could not update suggester", e);
-                } finally {
-                    reader.close();
-                }
+                updateSuggestions = true;
             }
         }
+
+        return updateSuggestions;
+    }
+
+    /**
+     * @return {@code false} if persisted lastUpdated time for index is after {@code calendar}. {@code true} otherwise
+     */
+    private boolean isIndexUpdatedAfter(Calendar calendar) {
+        NodeBuilder indexStats = definitionBuilder.child(":status");
+        PropertyState indexLastUpdatedValue = indexStats.getProperty("lastUpdated");
+        if (indexLastUpdatedValue != null) {
+            Calendar indexLastUpdatedTime = ISO8601.parse(indexLastUpdatedValue.getValue(Type.DATE));
+            return indexLastUpdatedTime.after(calendar);
+        } else {
+            return true;
+        }
+    }
+
+    /** Only set for testing */
+    static void setClock(Clock c) {
+        checkNotNull(c);
+        clock = c;
+    }
+
+    static private Calendar getCalendar() {
+        Calendar ret = Calendar.getInstance();
+        ret.setTime(clock.getDate());
+        return ret;
     }
 
     public void enableReindexMode(){
         reindex = true;
         IndexFormatVersion version = IndexDefinition.determineVersionForFreshIndex(definitionBuilder);
         definitionBuilder.setProperty(IndexDefinition.INDEX_VERSION, version.getVersion());
+
+        //Refresh the index definition based on update builder state
+        definition = new IndexDefinition(root, definitionBuilder);
     }
 
     public long incIndexedNodes() {
@@ -281,6 +402,10 @@ public class LuceneIndexEditorContext {
         return definition;
     }
 
+    FacetsConfig getFacetsConfig() {
+        return facetsConfig;
+    }
+
     @Deprecated
     public void recordTextExtractionStats(long timeInMillis, long bytesRead) {
         //Keeping deprecated method to avoid major version change
@@ -295,6 +420,10 @@ public class LuceneIndexEditorContext {
         return extractedTextCache;
     }
 
+    IndexAugmentorFactory getAugmentorFactory() {
+        return augmentorFactory;
+    }
+
     public boolean isReindex() {
         return reindex;
     }
@@ -303,6 +432,7 @@ public class LuceneIndexEditorContext {
         ClassLoader current = Thread.currentThread().getContextClassLoader();
         try {
             if (definition.hasCustomTikaConfig()) {
+                log.debug("[{}] Using custom tika config", definition.getIndexName());
                 Thread.currentThread().setContextClassLoader(LuceneIndexEditorContext.class.getClassLoader());
                 InputStream is = definition.getTikaConfig();
                 try {

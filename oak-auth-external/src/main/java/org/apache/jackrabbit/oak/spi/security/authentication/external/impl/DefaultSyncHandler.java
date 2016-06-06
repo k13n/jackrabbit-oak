@@ -103,7 +103,11 @@ public class DefaultSyncHandler implements SyncHandler {
     @Override
     public SyncContext createContext(@Nonnull ExternalIdentityProvider idp, @Nonnull UserManager userManager,
                                      @Nonnull ValueFactory valueFactory) throws SyncException {
-        return new DefaultSyncContext(config, idp, userManager, valueFactory);
+        if (config.user().getDynamicMembership()) {
+            return new DynamicSyncContext(config, idp, userManager, valueFactory);
+        } else {
+            return new DefaultSyncContext(config, idp, userManager, valueFactory);
+        }
     }
 
     /**
@@ -144,7 +148,7 @@ public class DefaultSyncHandler implements SyncHandler {
                 while (iter.hasNext()) {
                     try {
                         SyncedIdentity id = DefaultSyncContext.createSyncedIdentity(iter.next());
-                        if (id != null) {
+                        if (id != null && id.getExternalIdRef() != null) {
                             return id;
                         }
                     } catch (RepositoryException e) {

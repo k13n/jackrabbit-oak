@@ -26,7 +26,7 @@
   <parent>
     <groupId>org.apache.jackrabbit</groupId>
     <artifactId>oak-parent</artifactId>
-    <version>1.4-SNAPSHOT</version>
+    <version>1.6-SNAPSHOT</version>
     <relativePath>../../oak-parent/pom.xml</relativePath>
   </parent>
   <artifactId>oak-webapp</artifactId>
@@ -35,7 +35,7 @@
   <description>Web application that hosts and serves a Jackrabbit Oak content repository</description>
 
   <properties>
-    <oak.version>1.4-SNAPSHOT</oak.version>
+    <oak.version>1.6-SNAPSHOT</oak.version>
     <tomcat.version>7.0.40</tomcat.version>
     <tika.version>1.7</tika.version>
     <skip.deployment>true</skip.deployment>
@@ -134,7 +134,7 @@
     <dependency>
       <groupId>org.apache.felix</groupId>
       <artifactId>org.apache.felix.webconsole.plugins.scriptconsole</artifactId>
-      <version>1.0.0</version>
+      <version>1.0.2</version>
     </dependency>
     <dependency>
       <groupId>org.codehaus.groovy</groupId>

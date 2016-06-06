@@ -16,6 +16,8 @@
  */
 package org.apache.jackrabbit.oak.plugins.document.rdb;
 
+import java.io.Closeable;
+import java.io.IOException;
 import java.io.PrintWriter;
 import java.sql.Connection;
 import java.sql.SQLException;
@@ -35,7 +37,7 @@ import javax.sql.DataSource;
  * Note that the implementations currently focus on method invocations done
  * by {@link RDBDocumentStore} and thus may not be applicable for other use cases.
  */
-public class RDBDataSourceWrapper implements DataSource {
+public class RDBDataSourceWrapper implements DataSource, Closeable {
 
     // sample use in BasicDocumentStoreTest:
 
@@ -51,6 +53,7 @@ public class RDBDataSourceWrapper implements DataSource {
     // }
 
     private final DataSource ds;
+    private boolean batchResultPrecise = true;
 
     // Logging
 
@@ -80,6 +83,17 @@ public class RDBDataSourceWrapper implements DataSource {
      */
     public List<RDBLogEntry> stopLog() {
         return stopLog(Thread.currentThread());
+    }
+
+    /**
+     * Set to {@code false} to simulate drivers/DBs that do not return the number of affected rows in {@link Statement#executeBatch()}.
+     */
+    public void setBatchResultPrecise(boolean precise) {
+        this.batchResultPrecise = precise;
+    }
+
+    public boolean isBatchResultPrecise() {
+        return this.batchResultPrecise;
     }
 
     // DataSource
@@ -132,5 +146,12 @@ public class RDBDataSourceWrapper implements DataSource {
 
     public <T> T unwrap(Class<T> iface) throws SQLException {
         return ds.unwrap(iface);
+    }
+
+    @Override
+    public void close() throws IOException {
+        if (ds instanceof Closeable) {
+            ((Closeable) ds).close();
+        }
     }
 }

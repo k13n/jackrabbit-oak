@@ -17,6 +17,7 @@
 package org.apache.jackrabbit.oak.fixture;
 
 import java.io.File;
+
 import javax.jcr.Repository;
 
 import org.apache.jackrabbit.api.JackrabbitRepository;
@@ -37,6 +38,11 @@ public class OakRepositoryFixture implements RepositoryFixture {
         return getMongo(OakFixture.OAK_MONGO, host, port, database, dropDBAfterTest, cacheSize, false, null, 0);
     }
 
+    public static RepositoryFixture getMongo(String uri,
+                                             boolean dropDBAfterTest, long cacheSize) {
+        return getMongoNS(uri, dropDBAfterTest, cacheSize);
+    }
+
     public static RepositoryFixture getMongoWithFDS(String host, int port, String database,
                                              boolean dropDBAfterTest, long cacheSize,
                                              final File base, int fdsCacheInMB) {
@@ -44,9 +50,21 @@ public class OakRepositoryFixture implements RepositoryFixture {
                 dropDBAfterTest, cacheSize, true, base, fdsCacheInMB);
     }
 
+    public static RepositoryFixture getMongoWithFDS(String uri,
+                                                    boolean dropDBAfterTest, long cacheSize,
+                                                    final File base, int fdsCacheInMB) {
+        return new OakRepositoryFixture(OakFixture.getMongo(OakFixture.OAK_MONGO_FDS, uri, dropDBAfterTest,
+                cacheSize, true, base, fdsCacheInMB));
+    }
+
     public static RepositoryFixture getMongoNS(String host, int port, String database,
                                                boolean dropDBAfterTest, long cacheSize) {
         return getMongo(OakFixture.OAK_MONGO_NS, host, port, database, dropDBAfterTest, cacheSize, false, null, 0);
+    }
+
+    public static RepositoryFixture getMongoNS(String uri,
+                                               boolean dropDBAfterTest, long cacheSize) {
+        return new OakRepositoryFixture(OakFixture.getMongo(uri, dropDBAfterTest, cacheSize));
     }
 
     private static RepositoryFixture getMongo(String name,
@@ -79,6 +97,13 @@ public class OakRepositoryFixture implements RepositoryFixture {
         return new OakRepositoryFixture(OakFixture.getTar(OakFixture.OAK_TAR_FDS,base, maxFileSizeMB, cacheSizeMB, memoryMapping, true));
     }
 
+    public static RepositoryFixture getSegmentTar(File base, int maxFileSizeMB, int cacheSizeMB, boolean memoryMapping) {
+        return new OakRepositoryFixture(OakFixture.getSegmentTar(OakFixture.OAK_SEGMENT_TAR, base, maxFileSizeMB, cacheSizeMB, memoryMapping, false));
+    }
+
+    public static RepositoryFixture getSegmentTarWithBlobStore(File base, int maxFileSizeMB, int cacheSizeMB, boolean memoryMapping) {
+        return new OakRepositoryFixture(OakFixture.getSegmentTar(OakFixture.OAK_SEGMENT_TAR_FDS, base, maxFileSizeMB, cacheSizeMB, memoryMapping, true));
+    }
 
     private final OakFixture oakFixture;
     private Repository[] cluster;

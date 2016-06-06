@@ -18,14 +18,23 @@
  */
 package org.apache.jackrabbit.oak.upgrade;
 
+import java.io.File;
+import java.io.IOException;
+
+import javax.annotation.Nonnull;
+import javax.jcr.NamespaceRegistry;
+import javax.jcr.Node;
+import javax.jcr.RepositoryException;
+import javax.jcr.Session;
+
 import org.apache.jackrabbit.api.JackrabbitWorkspace;
 import org.apache.jackrabbit.api.security.authorization.PrivilegeManager;
 import org.apache.jackrabbit.commons.JcrUtils;
 import org.apache.jackrabbit.core.RepositoryContext;
 import org.apache.jackrabbit.core.RepositoryImpl;
 import org.apache.jackrabbit.core.config.RepositoryConfig;
-import org.apache.jackrabbit.oak.plugins.segment.SegmentNodeStore;
-import org.apache.jackrabbit.oak.plugins.segment.file.FileStore;
+import org.apache.jackrabbit.oak.segment.SegmentNodeStoreBuilders;
+import org.apache.jackrabbit.oak.segment.file.FileStore;
 import org.apache.jackrabbit.oak.spi.lifecycle.RepositoryInitializer;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
@@ -33,15 +42,6 @@ import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
-
-import javax.annotation.Nonnull;
-import javax.jcr.NamespaceRegistry;
-import javax.jcr.Node;
-import javax.jcr.Repository;
-import javax.jcr.RepositoryException;
-import javax.jcr.Session;
-import java.io.File;
-import java.io.IOException;
 
 /**
  * Test case to simulate an incremental upgrade, where a source repository is
@@ -59,7 +59,7 @@ public class RepeatedRepositoryUpgradeTest extends AbstractRepositoryUpgradeTest
 
     @Override
     protected NodeStore createTargetNodeStore() {
-        return new SegmentNodeStore(fileStore);
+        return SegmentNodeStoreBuilders.builder(fileStore).build();
     }
 
     @BeforeClass
@@ -67,7 +67,7 @@ public class RepeatedRepositoryUpgradeTest extends AbstractRepositoryUpgradeTest
         final File dir = new File(getTestDirectory(), "segments");
         dir.mkdirs();
         try {
-            fileStore = FileStore.newFileStore(dir).withMaxFileSize(128).create();
+            fileStore = FileStore.builder(dir).withMaxFileSize(128).build();
             upgradeComplete = false;
         } catch (IOException e) {
             throw new RuntimeException(e);
@@ -98,7 +98,7 @@ public class RepeatedRepositoryUpgradeTest extends AbstractRepositoryUpgradeTest
             }
 
             final NodeStore target = getTargetNodeStore();
-            doUpgradeRepository(sourceDir, target);
+            doUpgradeRepository(sourceDir, target, false);
             fileStore.flush();
 
             // re-create source repo
@@ -112,19 +112,19 @@ public class RepeatedRepositoryUpgradeTest extends AbstractRepositoryUpgradeTest
                 source.shutdown();
             }
 
-            doUpgradeRepository(sourceDir, target);
+            doUpgradeRepository(sourceDir, target, true);
             fileStore.flush();
 
             upgradeComplete = true;
         }
     }
 
-    @Override
-    protected void doUpgradeRepository(File source, NodeStore target) throws RepositoryException, IOException {
+    protected void doUpgradeRepository(File source, NodeStore target, boolean skipInit) throws RepositoryException, IOException {
         final RepositoryConfig config = RepositoryConfig.create(source);
         final RepositoryContext context = RepositoryContext.create(config);
         try {
             final RepositoryUpgrade repositoryUpgrade = new RepositoryUpgrade(context, target);
+            repositoryUpgrade.setSkipInitialization(skipInit);
             repositoryUpgrade.copy(new RepositoryInitializer() {
                 @Override
                 public void initialize(@Nonnull NodeBuilder builder) {

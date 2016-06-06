@@ -25,6 +25,9 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Enumeration;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Map.Entry;
 import java.util.UUID;
 
 import org.apache.jackrabbit.oak.commons.StringUtils;
@@ -71,6 +74,11 @@ public class ClusterNodeInfo {
     public static final String LEASE_END_KEY = "leaseEnd";
 
     /**
+     * The start time.
+     */
+    public static final String START_TIME_KEY = "startTime";
+
+    /**
      * The key for the root-revision of the last background write (of unsaved
      * modifications) - that is: the last root-revision written by the instance
      * in case of a clear shutdown or via recovery of another instance in case
@@ -84,6 +92,16 @@ public class ClusterNodeInfo {
      * @see org.apache.jackrabbit.oak.plugins.document.ClusterNodeInfo.ClusterNodeState
      */
     public static final String STATE = "state";
+    
+    /**
+     * The broadcast id. If the broadcasting cache is used, a new id is set after startup.
+     */
+    public static final String BROADCAST_ID = "broadcastId";
+
+    /**
+     * The broadcast listener (host:port). If the broadcasting cache is used, this is set after startup.
+     */
+    public static final String BROADCAST_LISTENER = "broadcastListener";
 
     public static enum ClusterNodeState {
         NONE,
@@ -159,8 +177,17 @@ public class ClusterNodeInfo {
      */
     private static Clock clock = Clock.SIMPLE;
 
-    /** OAK-3398 : default lease duration 120sec **/
-    public static final int DEFAULT_LEASE_DURATION_MILLIS = 1000 * 120;
+    public static final int DEFAULT_LEASE_DURATION_MILLIS;
+
+    static {
+        String leaseDurationProp = "oak.documentMK.leaseDurationSeconds";
+        Integer leaseProp = Integer.getInteger(leaseDurationProp);
+        if (leaseProp != null) {
+            LOG.info("Lease duration set to: " + leaseProp + "s (using system property " + leaseDurationProp + ")");
+        }
+        /** OAK-3398 : default lease duration 120sec **/
+        DEFAULT_LEASE_DURATION_MILLIS = 1000 * (leaseProp != null ? leaseProp : 120);
+    }
 
     /** OAK-3398 : default update interval 10sec **/
     public static final int DEFAULT_LEASE_UPDATE_INTERVAL_MILLIS = 1000 * 10;
@@ -328,6 +355,40 @@ public class ClusterNodeInfo {
     }
 
     /**
+     * Create a dummy cluster node info instance to be utilized for read only access to underlying store.
+     * @param store
+     * @return the cluster node info
+     */
+    public static ClusterNodeInfo getReadOnlyInstance(DocumentStore store) {
+        return new ClusterNodeInfo(0, store, MACHINE_ID, WORKING_DIR, ClusterNodeState.ACTIVE,
+                RecoverLockState.NONE, null, true) {
+            @Override
+            public void dispose() {
+            }
+
+            @Override
+            public long getLeaseTime() {
+                return Long.MAX_VALUE;
+            }
+
+            @Override
+            public void performLeaseCheck() {
+            }
+
+            @Override
+            public boolean renewLease() {
+                return false;
+            }
+
+            @Override
+            public void setInfo(Map<String, String> info) {}
+
+            @Override
+            public void setLeaseFailureHandler(LeaseFailureHandler leaseFailureHandler) {}
+        };
+    }
+
+    /**
      * Create a cluster node info instance for the store, with the
      *
      * @param store the document store (for the lease)
@@ -374,7 +435,7 @@ public class ClusterNodeInfo {
 
         int retries = 10;
         for (int i = 0; i < retries; i++) {
-            ClusterNodeInfo clusterNode = createInstance(store, machineId, instanceId, configuredClusterId);
+            ClusterNodeInfo clusterNode = createInstance(store, machineId, instanceId, configuredClusterId, i == 0);
             String key = String.valueOf(clusterNode.id);
             UpdateOp update = new UpdateOp(key, true);
             update.set(ID, key);
@@ -385,6 +446,7 @@ public class ClusterNodeInfo {
             } else {
                 update.set(LEASE_END_KEY, clusterNode.leaseEndTime);
             }
+            update.set(START_TIME_KEY, clusterNode.startTime);
             update.set(INFO_KEY, clusterNode.toString());
             update.set(STATE, clusterNode.state.name());
             update.set(REV_RECOVERY_LOCK, clusterNode.revRecoveryLock.name());
@@ -409,12 +471,13 @@ public class ClusterNodeInfo {
     }
 
     private static ClusterNodeInfo createInstance(DocumentStore store, String machineId,
-            String instanceId, int configuredClusterId) {
+            String instanceId, int configuredClusterId, boolean waitForLease) {
 
         long now = getCurrentTime();
         int clusterNodeId = 0;
         int maxId = 0;
         ClusterNodeState state = ClusterNodeState.NONE;
+        RecoverLockState lockState = RecoverLockState.NONE;
         Long prevLeaseEnd = null;
         boolean newEntry = false;
 
@@ -447,15 +510,24 @@ public class ClusterNodeInfo {
             }
 
             Long leaseEnd = (Long) doc.get(LEASE_END_KEY);
+            String mId = "" + doc.get(MACHINE_ID_KEY);
+            String iId = "" + doc.get(INSTANCE_ID_KEY);
 
             if (leaseEnd != null && leaseEnd > now) {
-                // TODO wait for lease end, see OAK-3449
+                // wait if (a) instructed to, and (b) also the remaining time
+                // time is not much bigger than the lease interval (in which
+                // case something is very very wrong anyway)
+                if (waitForLease && (leaseEnd - now) < (DEFAULT_LEASE_DURATION_MILLIS + 5000) && mId.equals(machineId)
+                        && iId.equals(instanceId)) {
+                    boolean worthRetrying = waitForLeaseExpiry(store, doc, leaseEnd.longValue(), machineId, instanceId);
+                    if (worthRetrying) {
+                        return createInstance(store, machineId, instanceId, configuredClusterId, false);
+                    }
+                }
+
                 reuseFailureReason = "leaseEnd " + leaseEnd + " > " + now + " - " + (leaseEnd - now) + "ms in the future";
                 continue;
             }
-
-            String mId = "" + doc.get(MACHINE_ID_KEY);
-            String iId = "" + doc.get(INSTANCE_ID_KEY);
 
             // remove entries with "random:" keys if not in use (no lease at all) 
             if (mId.startsWith(RANDOM_PREFIX) && leaseEnd == null) {
@@ -482,6 +554,7 @@ public class ClusterNodeInfo {
                 clusterNodeId = id;
                 state = ClusterNodeState.fromString((String) doc.get(STATE));
                 prevLeaseEnd = leaseEnd;
+                lockState = RecoverLockState.fromString((String) doc.get(REV_RECOVERY_LOCK));
             }
         }
 
@@ -503,7 +576,52 @@ public class ClusterNodeInfo {
         // Do not expire entries and stick on the earlier state, and leaseEnd so,
         // that _lastRev recovery if needed is done.
         return new ClusterNodeInfo(clusterNodeId, store, machineId, instanceId, state,
-                RecoverLockState.NONE, prevLeaseEnd, newEntry);
+                lockState, prevLeaseEnd, newEntry);
+    }
+
+    private static boolean waitForLeaseExpiry(DocumentStore store, ClusterNodeInfoDocument cdoc, long leaseEnd, String machineId,
+            String instanceId) {
+        String key = cdoc.getId();
+        LOG.info("Found an existing possibly active cluster node info (" + key + ") for this instance: " + machineId + "/"
+                + instanceId + ", will try use it.");
+
+        // wait until lease expiry plus 2s
+        long waitUntil = leaseEnd + 2000;
+
+        while (getCurrentTime() < waitUntil) {
+            LOG.info("Waiting for cluster node " + key + "'s lease to expire: " + (waitUntil - getCurrentTime()) / 1000 + "s left");
+
+            try {
+                clock.waitUntil(getCurrentTime() + 5000);
+            } catch (InterruptedException e) {
+                // ignored
+            }
+
+            try {
+                // check state of cluster node info
+                ClusterNodeInfoDocument reread = store.find(Collection.CLUSTER_NODES, key);
+                if (reread == null) {
+                    LOG.info("Cluster node info " + key + ": gone; continueing.");
+                    return true;
+                } else {
+                    Long newLeaseEnd = (Long) reread.get(LEASE_END_KEY);
+                    if (newLeaseEnd == null) {
+                        LOG.info("Cluster node " + key + ": lease end information missing, aborting.");
+                        return false;
+                    } else {
+                        if (newLeaseEnd.longValue() != leaseEnd) {
+                            LOG.info("Cluster node " + key + " seems to be still active (lease end changed from " + leaseEnd
+                                    + " to " + newLeaseEnd + ", will not try to use it.");
+                            return false;
+                        }
+                    }
+                }
+            } catch (DocumentStoreException ex) {
+                LOG.info("Error reading cluster node info for key " + key, ex);
+                return false;
+            }
+        }
+        return true;
     }
 
     public void performLeaseCheck() {
@@ -580,6 +698,11 @@ public class ClusterNodeInfo {
                     break;
                 }
             }
+            if (leaseCheckFailed) {
+                // someone else won and marked leaseCheckFailed - so we only log/throw
+                LOG.error(LEASE_CHECK_FAILED_MSG);
+                throw new AssertionError(LEASE_CHECK_FAILED_MSG);
+            }
             leaseCheckFailed = true; // make sure only one thread 'wins', ie goes any further
         }
 
@@ -633,6 +756,11 @@ public class ClusterNodeInfo {
      */
     public boolean renewLease() {
         long now = getCurrentTime();
+
+        if (LOG.isTraceEnabled()) {
+            LOG.trace("renewLease - leaseEndTime: " + leaseEndTime + ", leaseTime: " + leaseTime + ", leaseUpdateInterval: " + leaseUpdateInterval);
+        }
+
         if (now < leaseEndTime - leaseTime + leaseUpdateInterval) {
             // no need to renew the lease - it is still within 'leaseUpdateInterval'
             return false;
@@ -656,18 +784,20 @@ public class ClusterNodeInfo {
             now = getCurrentTime();
             leaseEndTime = now + leaseTime;
         }
+
         UpdateOp update = new UpdateOp("" + id, false);
         update.set(LEASE_END_KEY, leaseEndTime);
         update.set(STATE, ClusterNodeState.ACTIVE.name());
-        ClusterNodeInfoDocument doc = null;
-        if (renewed && !leaseCheckDisabled) { // if leaseCheckDisabled, then we just update the lease without checking
+
+        if (renewed && !leaseCheckDisabled) {
+            // if leaseCheckDisabled, then we just update the lease without
+            // checking
             // OAK-3398:
             // if we renewed the lease ever with this instance/ClusterNodeInfo
             // (which is the normal case.. except for startup),
             // then we can now make an assertion that the lease is unchanged
             // and the incremental update must only succeed if no-one else
             // did a recover/inactivation in the meantime
-            update.setNew(false); // in this case it is *not* a new document
             // make two assertions: the leaseEnd must match ..
             update.equals(LEASE_END_KEY, null, previousLeaseEndTime);
             // plus it must still be active ..
@@ -676,14 +806,17 @@ public class ClusterNodeInfo {
             // yet another field to clusterNodes: a runtimeId that we
             // create (UUID) at startup each time - and against that
             // we could also check here - but that goes a bit far IMO
-            doc = store.findAndUpdate(Collection.CLUSTER_NODES, update);
-        } else {
-            // this is only for startup - then we 'just' overwrite
-            // the lease - or create it - and don't care a lot about what the
-            // status of the lease was
-            doc = store.findAndUpdate(Collection.CLUSTER_NODES, update);
         }
-        if (doc==null) { // should not occur when leaseCheckDisabled
+
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("Renewing lease for cluster id " + id + " with UpdateOp " + update);
+        }
+        ClusterNodeInfoDocument doc = store.findAndUpdate(Collection.CLUSTER_NODES, update);
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("Lease renewal for cluster id " + id + " resulted in: " + doc);
+        }
+ 
+        if (doc == null) { // should not occur when leaseCheckDisabled
             // OAK-3398 : someone else either started recovering or is already through with that.
             // in both cases the local instance lost the lease-update-game - and hence
             // should behave and must consider itself as 'lease failed'
@@ -715,6 +848,22 @@ public class ClusterNodeInfo {
         }
         renewed = true;
         return true;
+    }
+    
+    /**
+     * Update the cluster node info.
+     * 
+     * @param info the map of changes
+     */
+    public void setInfo(Map<String, String> info) {
+        // synchronized, because renewLease is also synchronized 
+        synchronized(this) {
+            UpdateOp update = new UpdateOp("" + id, false);
+            for(Entry<String, String> e : info.entrySet()) {
+                update.set(e.getKey(), e.getValue());
+            }
+            store.findAndUpdate(Collection.CLUSTER_NODES, update);
+        }
     }
 
     /** for testing purpose only, not to be changed at runtime! */
@@ -814,6 +963,7 @@ public class ClusterNodeInfo {
         Exception exception = null;
         try {
             ArrayList<String> macAddresses = new ArrayList<String>();
+            ArrayList<String> likelyVirtualMacAddresses = new ArrayList<String>();
             ArrayList<String> otherAddresses = new ArrayList<String>();
             String hwaFromSysProp = getHWAFromSystemProperty();
             if ("".equals(hwaFromSysProp)) {
@@ -828,7 +978,14 @@ public class ClusterNodeInfo {
                             String str = StringUtils.convertBytesToHex(hwa);
                             if (hwa.length == 6) {
                                 // likely a MAC address
-                                macAddresses.add(str);
+                                String displayName = ni.getDisplayName().toLowerCase(Locale.ENGLISH);
+                                // de-prioritize addresses that are likely to be virtual (see OAK-3885)
+                                boolean looksVirtual = displayName.indexOf("virtual") >= 0 || displayName.indexOf("vpn") >= 0;
+                                if (!looksVirtual) {
+                                    macAddresses.add(str);
+                                } else {
+                                    likelyVirtualMacAddresses.add(str);
+                                }
                             } else {
                                 otherAddresses.add(str);
                             }
@@ -850,7 +1007,8 @@ public class ClusterNodeInfo {
             }
 
             if (LOG.isDebugEnabled()) {
-                LOG.debug("getMachineId(): discovered addresses: {} {}", macAddresses, otherAddresses);
+                LOG.debug("getMachineId(): discovered addresses: {} {} {}", macAddresses, likelyVirtualMacAddresses,
+                        otherAddresses);
             }
 
             if (macAddresses.size() > 0) {
@@ -858,6 +1016,9 @@ public class ClusterNodeInfo {
                 // the same one is used
                 Collections.sort(macAddresses);
                 return "mac:" + macAddresses.get(0);
+            } else if (likelyVirtualMacAddresses.size() > 0) {
+                Collections.sort(likelyVirtualMacAddresses);
+                return "mac:" + likelyVirtualMacAddresses.get(0);
             } else if (otherAddresses.size() > 0) {
                 // try the lowest "other" address
                 Collections.sort(otherAddresses);

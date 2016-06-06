@@ -46,6 +46,10 @@ public class OptionParserFactory {
 
     public static final String SRC_FDS = "src-datastore";
 
+    public static final String SRC_S3 = "src-s3datastore";
+
+    public static final String SRC_S3_CONFIG = "src-s3config";
+
     public static final String DST_FDS = "datastore";
 
     public static final String DST_FBS = "fileblobstore";
@@ -64,6 +68,8 @@ public class OptionParserFactory {
 
     public static final String MERGE_PATHS = "merge-paths";
 
+    public static final String SKIP_INIT = "skip-init";
+
     public static OptionParser create() {
         OptionParser op = new OptionParser();
         addUsageOptions(op);
@@ -72,10 +78,6 @@ public class OptionParserFactory {
         addPathsOptions(op);
         addVersioningOptions(op);
         addMiscOptions(op);
-
-//        op.nonOptions(
-//                "[/path/to/oak/repository|/path/to/crx2/repository|mongodb://host:port|<Jdbc URI>] [/path/to/repository.xml] {/path/to/oak/repository|mongodb://host:port|<Jdbc URI>}");
-
         return op;
     }
 
@@ -89,11 +91,14 @@ public class OptionParserFactory {
                 .ofType(String.class);
         op.accepts(SRC_FBS, "Datastore directory to be used as a source FileBlobStore").withRequiredArg()
                 .ofType(String.class);
+        op.accepts(SRC_S3, "Datastore directory to be used for the source S3").withRequiredArg().ofType(String.class);
+        op.accepts(SRC_S3_CONFIG, "Configuration file for the source S3DataStore").withRequiredArg()
+                .ofType(String.class);
         op.accepts(DST_FDS, "Datastore directory to be used as a target FileDataStore").withRequiredArg()
-            .ofType(String.class);
+                .ofType(String.class);
         op.accepts(DST_FBS, "Datastore directory to be used as a target FileBlobStore").withRequiredArg()
                 .ofType(String.class);
-        op.accepts(DST_S3, "Repository home to be used for the target S3").withRequiredArg().ofType(String.class);
+        op.accepts(DST_S3, "Datastore directory to be used for the target S3").withRequiredArg().ofType(String.class);
         op.accepts(DST_S3_CONFIG, "Configuration file for the target S3DataStore").withRequiredArg()
                 .ofType(String.class);
     }
@@ -129,5 +134,6 @@ public class OptionParserFactory {
         op.accepts(EARLY_SHUTDOWN,
                 "Shutdown the source repository after nodes are copied and before the commit hooks are applied");
         op.accepts(CACHE_SIZE, "Cache size in MB").withRequiredArg().ofType(Integer.class).defaultsTo(256);
+        op.accepts(SKIP_INIT, "Skip the repository initialization; only copy data");
     }
 }

@@ -20,20 +20,32 @@
 package org.apache.jackrabbit.oak.run.osgi
 
 import org.apache.felix.connect.launch.PojoServiceRegistry
+import org.apache.jackrabbit.oak.api.Blob
+import org.apache.jackrabbit.oak.api.jmx.CacheStatsMBean
+import org.apache.jackrabbit.oak.plugins.blob.CachingBlobStore
 import org.apache.jackrabbit.oak.plugins.document.DocumentNodeStore
+import org.apache.jackrabbit.oak.plugins.document.DocumentStoreStatsMBean
+import org.apache.jackrabbit.oak.plugins.document.MongoUtils
 import org.apache.jackrabbit.oak.plugins.document.mongo.MongoBlobStore
 import org.apache.jackrabbit.oak.plugins.document.util.MongoConnection
 import org.apache.jackrabbit.oak.spi.blob.BlobStore
+import org.apache.jackrabbit.oak.spi.blob.GarbageCollectableBlobStore
 import org.apache.jackrabbit.oak.spi.blob.MemoryBlobStore
+import org.apache.jackrabbit.oak.spi.blob.stats.BlobStoreStatsMBean
+import org.apache.jackrabbit.oak.spi.commit.CommitInfo
+import org.apache.jackrabbit.oak.spi.commit.EmptyHook
+import org.apache.jackrabbit.oak.spi.state.NodeBuilder
 import org.apache.jackrabbit.oak.spi.state.NodeStore
 import org.h2.jdbcx.JdbcDataSource
 import org.junit.After
 import org.junit.Test
+import org.osgi.framework.ServiceReference
 import org.osgi.framework.ServiceRegistration
 
 import javax.sql.DataSource
 import java.sql.Connection
 import java.sql.ResultSet
+import java.util.concurrent.TimeUnit
 
 import static org.junit.Assume.assumeTrue
 
@@ -63,6 +75,8 @@ class DocumentNodeStoreConfigTest extends AbstractRepositoryFactoryTest {
 
         //4. Check that only one cluster node was instantiated
         assert getIdsOfClusterNodes(ds).size() == 1
+        testBlobStoreStats(ns)
+        testDocumentStoreStats(ns)
     }
 
     @Test
@@ -84,6 +98,7 @@ class DocumentNodeStoreConfigTest extends AbstractRepositoryFactoryTest {
 
         //3. Shut down ds
         srds.unregister();
+        TimeUnit.MILLISECONDS.sleep(500);
         assertNoService(NodeStore.class)
 
         //4. Restart ds, service should still be down
@@ -206,8 +221,8 @@ class DocumentNodeStoreConfigTest extends AbstractRepositoryFactoryTest {
         registry = repositoryFactory.initializeServiceRegistry(config)
         createConfig([
                 'org.apache.jackrabbit.oak.plugins.document.DocumentNodeStoreService': [
-                        mongouri       : MongoUtils.mongoURI,
-                        db             : MongoUtils.mongoDB,
+                        mongouri       : MongoUtils.URL,
+                        db             : MongoUtils.DB,
                         customBlobStore: true
                 ]
         ])
@@ -219,6 +234,8 @@ class DocumentNodeStoreConfigTest extends AbstractRepositoryFactoryTest {
         Collection<String> colNames = getCollectionNames()
         assert colNames.containsAll(['NODES'])
         assert !colNames.contains(['BLOBS'])
+        assert registry.getServiceReference(BlobStoreStatsMBean.class.name) == null : "BlobStoreStatsMBean should " +
+                "*NOT* be registered by DocumentNodeStoreService in case custom blobStore used"
     }
 
     @Test
@@ -228,9 +245,9 @@ class DocumentNodeStoreConfigTest extends AbstractRepositoryFactoryTest {
         registry = repositoryFactory.initializeServiceRegistry(config)
         createConfig([
                 'org.apache.jackrabbit.oak.plugins.document.DocumentNodeStoreService': [
-                        mongouri: MongoUtils.mongoURI,
-                        db      : MongoUtils.mongoDB,
-                        blobCacheSize      : 1024,
+                        mongouri: MongoUtils.URL,
+                        db      : MongoUtils.DB,
+                        blobCacheSize      : 1,
                 ]
         ])
 
@@ -239,7 +256,44 @@ class DocumentNodeStoreConfigTest extends AbstractRepositoryFactoryTest {
         Collection<String> colNames = getCollectionNames()
         assert colNames.containsAll(['NODES', "BLOBS"])
 
-        assert 1024*1024*1024 == ((MongoBlobStore)ns.blobStore).blobCacheSize
+        assert 1*1024*1024 == ((MongoBlobStore)ns.blobStore).blobCacheSize
+        assert getService(BlobStoreStatsMBean.class) : "BlobStoreStatsMBean should " +
+                "be registered by DocumentNodeStoreService in default blobStore used"
+
+        testBlobStoreStats(ns)
+        testDocumentStoreStats(ns)
+    }
+
+    private void testDocumentStoreStats(DocumentNodeStore store) {
+        DocumentStoreStatsMBean stats = getService(DocumentStoreStatsMBean.class)
+
+        long createdNodeCount = stats.nodesCreateCount
+        NodeBuilder builder = store.getRoot().builder()
+        builder.child("testDocumentStoreStats").child("a")
+        store.merge(builder, EmptyHook.INSTANCE, CommitInfo.EMPTY);
+
+        assert stats.nodesCreateCount - createdNodeCount >= 2
+
+    }
+
+    private void testBlobStoreStats(DocumentNodeStore nodeStore) throws Exception{
+        int size = 1024 * 1024 * 5
+        Blob blob = nodeStore.createBlob(testStream(size));
+        BlobStoreStatsMBean stats = getService(BlobStoreStatsMBean.class)
+        assert stats.getUploadTotalSize() == size
+        assert stats.uploadCount > 0
+
+        BlobStore bs = nodeStore.blobStore;
+        assert bs instanceof GarbageCollectableBlobStore
+        bs.clearCache()
+
+        assert size == blob.newStream.getBytes().length
+
+        assert stats.downloadCount > 0
+        assert stats.downloadTotalSize > 0
+
+        assertCacheStatsMBean(CachingBlobStore.MEM_CACHE_NAME)
+
     }
 
     @Override
@@ -249,6 +303,7 @@ class DocumentNodeStoreConfigTest extends AbstractRepositoryFactoryTest {
 
     @After
     public void tearDown() {
+        super.tearDown()
         if (mongoConn) {
             MongoUtils.dropCollections(mongoConn.DB)
         }
@@ -257,7 +312,7 @@ class DocumentNodeStoreConfigTest extends AbstractRepositoryFactoryTest {
     private mongoCheck() {
         //Somehow in Groovy assumeNotNull cause issue as Groovy probably
         //does away with null array causing a NPE
-        assumeTrue(mongoConn != null)
+        assumeTrue(MongoUtils.isAvailable())
     }
 
     private Collection<String> getCollectionNames() {
@@ -296,5 +351,24 @@ class DocumentNodeStoreConfigTest extends AbstractRepositoryFactoryTest {
         DataSource ds = new JdbcDataSource()
         ds.url = url
         return ds
+    }
+
+    private InputStream testStream(int size) {
+        //Cannot use NullInputStream as it throws exception upon EOF
+        byte[] data = new byte[size];
+        new Random().nextBytes(data);
+        return new ByteArrayInputStream(data);
+    }
+
+    private void assertCacheStatsMBean(String name){
+        ServiceReference[] refs = registry.getServiceReferences(CacheStatsMBean.class.name,null);
+        def names = []
+        def cacheStatsRef = refs.find { ServiceReference ref ->
+            CacheStatsMBean mbean = registry.getService(ref);
+            names << mbean.name
+            return mbean.name == name
+        }
+
+        assert  cacheStatsRef : "No CacheStat found for [$name]. Registered cache stats $names"
     }
 }

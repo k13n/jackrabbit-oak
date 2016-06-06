@@ -20,10 +20,16 @@
 package org.apache.jackrabbit.oak.plugins.index.lucene;
 
 import java.io.IOException;
+import java.util.concurrent.TimeUnit;
 
 import javax.annotation.CheckForNull;
+import javax.annotation.Nonnull;
 
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
+import com.google.common.cache.Weigher;
 import org.apache.jackrabbit.oak.api.Blob;
+import org.apache.jackrabbit.oak.cache.CacheStats;
 import org.apache.jackrabbit.oak.commons.IOUtils;
 import org.apache.jackrabbit.oak.plugins.index.fulltext.ExtractedText;
 import org.apache.jackrabbit.oak.plugins.index.fulltext.PreExtractedTextProvider;
@@ -41,6 +47,30 @@ class ExtractedTextCache {
     private long totalTextSize;
     private long totalTime;
     private int preFetchedCount;
+    private final Cache<String, String> cache;
+    private final CacheStats cacheStats;
+    private final boolean alwaysUsePreExtractedCache;
+
+    public ExtractedTextCache(long maxWeight, long expiryTimeInSecs){
+        this(maxWeight, expiryTimeInSecs, false);
+    }
+
+    public ExtractedTextCache(long maxWeight, long expiryTimeInSecs, boolean alwaysUsePreExtractedCache) {
+        if (maxWeight > 0) {
+            cache = CacheBuilder.newBuilder()
+                    .weigher(EmpiricalWeigher.INSTANCE)
+                    .maximumWeight(maxWeight)
+                    .expireAfterAccess(expiryTimeInSecs, TimeUnit.SECONDS)
+                    .recordStats()
+                    .build();
+            cacheStats = new CacheStats(cache, "ExtractedTextCache",
+                    EmpiricalWeigher.INSTANCE, maxWeight);
+        } else {
+            cache = null;
+            cacheStats = null;
+        }
+        this.alwaysUsePreExtractedCache = alwaysUsePreExtractedCache;
+    }
 
     /**
      * Get the pre extracted text for given blob
@@ -53,8 +83,9 @@ class ExtractedTextCache {
         //Consult the PreExtractedTextProvider only in reindex mode and not in
         //incremental indexing mode. As that would only contain older entries
         //That also avoid loading on various state (See DataStoreTextWriter)
-        if (reindexMode && extractedTextProvider != null){
-            String propertyPath = concat(nodePath, propertyName);
+        String propertyPath = concat(nodePath, propertyName);
+        log.trace("Looking for extracted text for [{}] with blobId [{}]", propertyPath, blob.getContentIdentity());
+        if ((reindexMode || alwaysUsePreExtractedCache) && extractedTextProvider != null){
             try {
                 ExtractedText text = extractedTextProvider.getText(propertyPath, blob);
                 if (text != null) {
@@ -75,11 +106,21 @@ class ExtractedTextCache {
                 log.warn("Error occurred while fetching pre extracted text for {}", propertyPath, e);
             }
         }
+
+        String id = blob.getContentIdentity();
+        if (cache != null && id != null && result == null) {
+            result = cache.getIfPresent(id);
+        }
         return result;
     }
 
-    public void put(Blob blob, ExtractedText extractedText){
-
+    public void put(@Nonnull Blob blob, @Nonnull ExtractedText extractedText) {
+        String id = blob.getContentIdentity();
+        if (extractedText.getExtractionResult() == ExtractedText.ExtractionResult.SUCCESS
+                && cache != null
+                && id != null) {
+            cache.put(id, extractedText.getExtractedText().toString());
+        }
     }
 
     public void addStats(int count, long timeInMillis, long bytesRead, long textLength){
@@ -120,7 +161,17 @@ class ExtractedTextCache {
             public String getBytesRead() {
                 return IOUtils.humanReadableByteCount(totalBytesRead);
             }
+
+            @Override
+            public boolean isAlwaysUsePreExtractedCache() {
+                return alwaysUsePreExtractedCache;
+            }
         };
+    }
+
+    @CheckForNull
+    public CacheStats getCacheStats() {
+        return cacheStats;
     }
 
     public void setExtractedTextProvider(PreExtractedTextProvider extractedTextProvider) {
@@ -129,5 +180,36 @@ class ExtractedTextCache {
 
     public PreExtractedTextProvider getExtractedTextProvider() {
         return extractedTextProvider;
+    }
+
+    void resetCache(){
+        if (cache != null){
+            cache.invalidateAll();
+        }
+    }
+
+    boolean isAlwaysUsePreExtractedCache() {
+        return alwaysUsePreExtractedCache;
+    }
+
+    //Taken from DocumentNodeStore and cache packages as they are private
+    private static class EmpiricalWeigher implements Weigher<String, String> {
+        public static final EmpiricalWeigher INSTANCE = new EmpiricalWeigher();
+
+        private EmpiricalWeigher() {
+        }
+
+        private static int getMemory(@Nonnull String s) {
+            return 16                           // shallow size
+                    + 40 + s.length() * 2;  // value
+        }
+
+        @Override
+        public int weigh(String key, String value) {
+            int size = 168;                 // overhead for each cache entry
+            size += getMemory(key);        // key
+            size += getMemory(value);      // value
+            return size;
+        }
     }
 }

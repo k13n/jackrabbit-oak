@@ -23,6 +23,7 @@ import static org.apache.jackrabbit.oak.api.CommitFailedException.OAK;
 import static org.apache.jackrabbit.oak.api.CommitFailedException.STATE;
 import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.COLLISIONS;
 
+import java.util.HashSet;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.Callable;
@@ -33,6 +34,8 @@ import java.util.concurrent.locks.ReadWriteLock;
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 
+import com.google.common.base.Function;
+import com.google.common.collect.Iterables;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 
@@ -149,7 +152,7 @@ class DocumentNodeStoreBranch implements NodeStoreBranch {
                              boolean exclusive)
             throws CommitFailedException {
         CommitFailedException ex = null;
-        Revision conflictRevision = null;
+        Set<Revision> conflictRevisions = new HashSet<Revision>();
         long time = System.currentTimeMillis();
         int numRetries = 0;
         for (long backoff = MIN_BACKOFF; backoff <= maximumBackoff; backoff *= 2) {
@@ -159,14 +162,13 @@ class DocumentNodeStoreBranch implements NodeStoreBranch {
                     final long start = perfLogger.start();
                     // suspend until conflict revision is visible
                     // or as a fallback sleep for a while
-                    if (conflictRevision != null) {
+                    if (!conflictRevisions.isEmpty()) {
                         // suspend until conflicting revision is visible
                         LOG.debug("Suspending until {} is visible. Current head {}.",
-                                conflictRevision, store.getHeadRevision());
-                        store.suspendUntil(conflictRevision);
+                                conflictRevisions, store.getHeadRevision());
+                        store.suspendUntilAll(conflictRevisions);
+                        conflictRevisions.clear();
                         LOG.debug("Resumed. Current head {}.", store.getHeadRevision());
-                        // reset conflict revision
-                        conflictRevision = null;
                     } else {
                         Thread.sleep(backoff + RANDOM.nextInt((int) Math.min(backoff, Integer.MAX_VALUE)));
                     }
@@ -181,7 +183,7 @@ class DocumentNodeStoreBranch implements NodeStoreBranch {
                         checkNotNull(info), exclusive);
             } catch (FailedWithConflictException e) {
                 ex = e;
-                conflictRevision = e.getConflictRevision();
+                conflictRevisions.addAll(e.getConflictRevisions());
             } catch (CommitFailedException e) {
                 ex = e;
             }
@@ -279,7 +281,7 @@ class DocumentNodeStoreBranch implements NodeStoreBranch {
             CommitInfo info) {
         boolean success = false;
         Commit c = store.newCommit(base.getRevision(), this);
-        Revision rev;
+        RevisionVector rev;
         try {
             op.with(c);
             if (c.isEmpty()) {
@@ -287,12 +289,11 @@ class DocumentNodeStoreBranch implements NodeStoreBranch {
                 // finally clause cancel the commit
                 return base;
             }
-            rev = c.apply();
+            c.apply();
+            rev = store.done(c, base.getRevision().isBranch(), info);
             success = true;
         } finally {
-            if (success) {
-                store.done(c, base.getRevision().isBranch(), info);
-            } else {
+            if (!success) {
                 store.canceled(c);
             }
         }
@@ -546,7 +547,7 @@ class DocumentNodeStoreBranch implements NodeStoreBranch {
          * @return the branch state.
          */
         final DocumentNodeState createBranch(DocumentNodeState state) {
-            return store.getRoot(state.getRevision().asBranchRevision());
+            return store.getRoot(state.getRevision().asBranchRevision(store.getClusterId()));
         }
 
         @Override
@@ -619,8 +620,7 @@ class DocumentNodeStoreBranch implements NodeStoreBranch {
             try {
                 head = store.getRoot(
                         store.reset(branchHead.getRevision(), 
-                                ancestor.getRevision(), 
-                                DocumentNodeStoreBranch.this));
+                                ancestor.getRevision()));
             } catch (Exception e) {
                 CommitFailedException ex = new CommitFailedException(
                         OAK, 100, "Branch reset failed", e);
@@ -641,8 +641,15 @@ class DocumentNodeStoreBranch implements NodeStoreBranch {
                 return;
             }
             NodeDocument doc = Utils.getRootDocument(store.getDocumentStore());
-            Set<Revision> collisions = doc.getLocalMap(COLLISIONS).keySet();
-            Set<Revision> conflicts = Sets.intersection(collisions, b.getCommits());
+            Set<Revision> collisions = Sets.newHashSet(doc.getLocalMap(COLLISIONS).keySet());
+            Set<Revision> commits = Sets.newHashSet(Iterables.transform(b.getCommits(),
+                    new Function<Revision, Revision>() {
+                        @Override
+                        public Revision apply(Revision input) {
+                            return input.asTrunkRevision();
+                        }
+                    }));
+            Set<Revision> conflicts = Sets.intersection(collisions, commits);
             if (!conflicts.isEmpty()) {
                 throw new CommitFailedException(STATE, 2,
                         "Conflicting concurrent change on branch commits " + conflicts);

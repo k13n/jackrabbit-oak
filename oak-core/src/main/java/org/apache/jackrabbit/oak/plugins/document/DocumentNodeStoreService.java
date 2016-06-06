@@ -27,12 +27,14 @@ import static org.apache.jackrabbit.oak.plugins.document.DocumentMK.Builder.DEFA
 import static org.apache.jackrabbit.oak.plugins.document.DocumentMK.Builder.DEFAULT_DIFF_CACHE_PERCENTAGE;
 import static org.apache.jackrabbit.oak.plugins.document.DocumentMK.Builder.DEFAULT_DOC_CHILDREN_CACHE_PERCENTAGE;
 import static org.apache.jackrabbit.oak.plugins.document.DocumentMK.Builder.DEFAULT_NODE_CACHE_PERCENTAGE;
+import static org.apache.jackrabbit.oak.plugins.document.DocumentMK.Builder.DEFAULT_PREV_DOC_CACHE_PERCENTAGE;
 import static org.apache.jackrabbit.oak.spi.blob.osgi.SplitBlobStoreService.ONLY_STANDALONE_TARGET;
 import static org.apache.jackrabbit.oak.spi.whiteboard.WhiteboardUtils.registerMBean;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Dictionary;
 import java.util.HashMap;
 import java.util.Hashtable;
@@ -43,9 +45,6 @@ import java.util.concurrent.TimeUnit;
 
 import javax.sql.DataSource;
 
-import com.mongodb.DB;
-import com.mongodb.MongoClient;
-import com.mongodb.MongoClientOptions;
 import com.mongodb.MongoClientURI;
 
 import org.apache.felix.scr.annotations.Activate;
@@ -57,8 +56,11 @@ import org.apache.felix.scr.annotations.PropertyOption;
 import org.apache.felix.scr.annotations.Reference;
 import org.apache.felix.scr.annotations.ReferenceCardinality;
 import org.apache.felix.scr.annotations.ReferencePolicy;
+import org.apache.jackrabbit.commons.SimpleValueFactory;
+import org.apache.jackrabbit.oak.api.Descriptors;
 import org.apache.jackrabbit.oak.api.jmx.CacheStatsMBean;
 import org.apache.jackrabbit.oak.api.jmx.CheckpointMBean;
+import org.apache.jackrabbit.oak.api.jmx.PersistentCacheStatsMBean;
 import org.apache.jackrabbit.oak.cache.CacheStats;
 import org.apache.jackrabbit.oak.commons.PropertiesUtil;
 import org.apache.jackrabbit.oak.osgi.ObserverTracker;
@@ -66,13 +68,18 @@ import org.apache.jackrabbit.oak.osgi.OsgiWhiteboard;
 import org.apache.jackrabbit.oak.plugins.blob.BlobGC;
 import org.apache.jackrabbit.oak.plugins.blob.BlobGCMBean;
 import org.apache.jackrabbit.oak.plugins.blob.BlobGarbageCollector;
+import org.apache.jackrabbit.oak.plugins.blob.BlobStoreStats;
 import org.apache.jackrabbit.oak.plugins.blob.SharedDataStore;
 import org.apache.jackrabbit.oak.plugins.blob.datastore.SharedDataStoreUtils;
+import org.apache.jackrabbit.oak.plugins.document.persistentCache.CacheType;
+import org.apache.jackrabbit.oak.plugins.document.persistentCache.PersistentCacheStats;
 import org.apache.jackrabbit.oak.plugins.document.util.MongoConnection;
 import org.apache.jackrabbit.oak.plugins.identifier.ClusterRepositoryInfo;
 import org.apache.jackrabbit.oak.spi.blob.BlobStore;
 import org.apache.jackrabbit.oak.spi.blob.BlobStoreWrapper;
 import org.apache.jackrabbit.oak.spi.blob.GarbageCollectableBlobStore;
+import org.apache.jackrabbit.oak.spi.blob.stats.BlobStoreStatsMBean;
+import org.apache.jackrabbit.oak.spi.state.Clusterable;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
 import org.apache.jackrabbit.oak.spi.state.RevisionGC;
 import org.apache.jackrabbit.oak.spi.state.RevisionGCMBean;
@@ -80,6 +87,8 @@ import org.apache.jackrabbit.oak.spi.whiteboard.Registration;
 import org.apache.jackrabbit.oak.spi.whiteboard.Whiteboard;
 import org.apache.jackrabbit.oak.spi.whiteboard.WhiteboardExecutor;
 import org.apache.jackrabbit.oak.spi.whiteboard.WhiteboardUtils;
+import org.apache.jackrabbit.oak.stats.StatisticsProvider;
+import org.apache.jackrabbit.oak.util.GenericDescriptors;
 import org.osgi.framework.Bundle;
 import org.osgi.framework.BundleException;
 import org.osgi.framework.Constants;
@@ -142,13 +151,19 @@ public class DocumentNodeStoreService {
             description = "Cache size in MB. This is distributed among various caches used in DocumentNodeStore"
     )
     private static final String PROP_CACHE = "cache";
-    
+
     @Property(intValue = DEFAULT_NODE_CACHE_PERCENTAGE,
             label = "NodeState Cache",
             description = "Percentage of cache to be allocated towards Node cache"
     )
     private static final String PROP_NODE_CACHE_PERCENTAGE = "nodeCachePercentage";
-    
+
+    @Property(intValue = DEFAULT_PREV_DOC_CACHE_PERCENTAGE,
+            label = "PreviousDocument Cache",
+            description = "Percentage of cache to be allocated towards Previous Document cache"
+    )
+    private static final String PROP_PREV_DOC_CACHE_PERCENTAGE = "prevDocCachePercentage";
+
     @Property(intValue = DocumentMK.Builder.DEFAULT_CHILDREN_CACHE_PERCENTAGE,
             label = "NodeState Children Cache",
             description = "Percentage of cache to be allocated towards Children cache"
@@ -221,6 +236,19 @@ public class DocumentNodeStoreService {
                     + "Default is " + DEFAULT_JOURNAL_GC_MAX_AGE_MILLIS
     )
     private static final String PROP_JOURNAL_GC_MAX_AGE_MILLIS = "journalGCMaxAge";
+
+    /**
+     * Batch size used during to lookup and delete journal entries during journalGC
+     */
+    private static final int DEFAULT_JOURNAL_GC_BATCH_SIZE = 100;
+    @Property (intValue = DEFAULT_JOURNAL_GC_BATCH_SIZE,
+            label = "Batch size used for journalGC",
+            description = "The journal gc queries the journal for entries older than configured to delete them. " +
+                    "It does so in batches to speed up the process. The batch size can be configured via this " +
+                    " property. The trade-off is between reducing number of operations with a larger batch size, " +
+                    " and consuming more memory less memory with a smaller batch size."
+    )
+    public static final String PROP_JOURNAL_GC_BATCH_SIZE = "journalGcBatchSize";
 
     private static final long MB = 1024 * 1024;
 
@@ -312,6 +340,9 @@ public class DocumentNodeStoreService {
     public static final String PROP_DS_TYPE = "documentStoreType";
     private DocumentStoreType documentStoreType;
 
+    @Reference
+    private StatisticsProvider statisticsProvider;
+
     private boolean customBlobStore;
 
     @Activate
@@ -350,6 +381,7 @@ public class DocumentNodeStoreService {
 
         int cacheSize = toInteger(prop(PROP_CACHE), DEFAULT_CACHE);
         int nodeCachePercentage = toInteger(prop(PROP_NODE_CACHE_PERCENTAGE), DEFAULT_NODE_CACHE_PERCENTAGE);
+        int prevDocCachePercentage = toInteger(prop(PROP_PREV_DOC_CACHE_PERCENTAGE), DEFAULT_NODE_CACHE_PERCENTAGE);
         int childrenCachePercentage = toInteger(prop(PROP_CHILDREN_CACHE_PERCENTAGE), DEFAULT_CHILDREN_CACHE_PERCENTAGE);
         int docChildrenCachePercentage = toInteger(prop(PROP_DOC_CHILDREN_CACHE_PERCENTAGE), DEFAULT_DOC_CHILDREN_CACHE_PERCENTAGE);
         int diffCachePercentage = toInteger(prop(PROP_DIFF_CACHE_PERCENTAGE), DEFAULT_DIFF_CACHE_PERCENTAGE);
@@ -357,12 +389,13 @@ public class DocumentNodeStoreService {
         String persistentCache = PropertiesUtil.toString(prop(PROP_PERSISTENT_CACHE), DEFAULT_PERSISTENT_CACHE);
         int cacheSegmentCount = toInteger(prop(PROP_CACHE_SEGMENT_COUNT), DEFAULT_CACHE_SEGMENT_COUNT);
         int cacheStackMoveDistance = toInteger(prop(PROP_CACHE_STACK_MOVE_DISTANCE), DEFAULT_CACHE_STACK_MOVE_DISTANCE);
-
         DocumentMK.Builder mkBuilder =
                 new DocumentMK.Builder().
+                setStatisticsProvider(statisticsProvider).
                 memoryCacheSize(cacheSize * MB).
                 memoryCacheDistribution(
-                        nodeCachePercentage, 
+                        nodeCachePercentage,
+                        prevDocCachePercentage,
                         childrenCachePercentage, 
                         docChildrenCachePercentage, 
                         diffCachePercentage).
@@ -418,8 +451,7 @@ public class DocumentNodeStoreService {
                 log.info("Connected to datasource {}", dataSource);
             }
         } else {
-            MongoClientOptions.Builder builder = MongoConnection.getDefaultBuilder();
-            MongoClientURI mongoURI = new MongoClientURI(uri, builder);
+            MongoClientURI mongoURI = new MongoClientURI(uri);
 
             if (log.isInfoEnabled()) {
                 // Take care around not logging the uri directly as it
@@ -430,13 +462,10 @@ public class DocumentNodeStoreService {
                 log.info("Mongo Connection details {}", MongoConnection.toString(mongoURI.getOptions()));
             }
 
-            MongoClient client = new MongoClient(mongoURI);
-            DB mongoDB = client.getDB(db);
-
             mkBuilder.setMaxReplicationLag(maxReplicationLagInSecs, TimeUnit.SECONDS);
-            mkBuilder.setMongoDB(mongoDB, blobCacheSize);
+            mkBuilder.setMongoDB(uri, db, blobCacheSize);
 
-            log.info("Connected to database {}", mongoDB);
+            log.info("Connected to database '{}'", db);
         }
 
         //Set wrapping blob store after setting the DB
@@ -448,10 +477,18 @@ public class DocumentNodeStoreService {
         mkBuilder.setExecutor(executor);
         mk = mkBuilder.open();
 
+        // ensure a clusterId is initialized 
+        // and expose it as 'oak.clusterid' repository descriptor
+        GenericDescriptors clusterIdDesc = new GenericDescriptors();
+        clusterIdDesc.put(ClusterRepositoryInfo.OAK_CLUSTERID_REPOSITORY_DESCRIPTOR_KEY, 
+                new SimpleValueFactory().createValue(
+                        ClusterRepositoryInfo.getOrCreateId(mk.getNodeStore())), true, false);
+        whiteboard.register(Descriptors.class, clusterIdDesc, Collections.emptyMap());
+        
         // If a shared data store register the repo id in the data store
         if (SharedDataStoreUtils.isShared(blobStore)) {
             try {
-                String repoId = ClusterRepositoryInfo.createId(mk.getNodeStore());
+                String repoId = ClusterRepositoryInfo.getOrCreateId(mk.getNodeStore());
                 ((SharedDataStore) blobStore).addMetadataRecord(new ByteArrayInputStream(new byte[0]),
                     SharedDataStoreUtils.SharedStoreRecordType.REPOSITORY.getNameFromId(repoId));
             } catch (Exception e) {
@@ -459,7 +496,7 @@ public class DocumentNodeStoreService {
             }
         }
 
-        registerJMXBeans(mk.getNodeStore());
+        registerJMXBeans(mk.getNodeStore(), mkBuilder);
         registerLastRevRecoveryJob(mk.getNodeStore());
         registerJournalGC(mk.getNodeStore());
 
@@ -495,7 +532,13 @@ public class DocumentNodeStoreService {
         // OAK-2844: in order to allow DocumentDiscoveryLiteService to directly
         // require a service DocumentNodeStore (instead of having to do an 'instanceof')
         // the registration is now done for both NodeStore and DocumentNodeStore here.
-        reg = context.getBundleContext().registerService(new String[]{NodeStore.class.getName(), DocumentNodeStore.class.getName()}, store, props);
+        reg = context.getBundleContext().registerService(
+            new String[]{
+                 NodeStore.class.getName(), 
+                 DocumentNodeStore.class.getName(), 
+                 Clusterable.class.getName()
+            }, 
+            store, props);
     }
 
     @Deactivate
@@ -570,7 +613,8 @@ public class DocumentNodeStoreService {
         }
     }
 
-    private void registerJMXBeans(final DocumentNodeStore store) throws IOException {
+    private void registerJMXBeans(final DocumentNodeStore store, DocumentMK.Builder mkBuilder) throws
+            IOException {
         registrations.add(
                 registerMBean(whiteboard,
                         CacheStatsMBean.class,
@@ -599,13 +643,15 @@ public class DocumentNodeStoreService {
         }
         DocumentStore ds = store.getDocumentStore();
         if (ds.getCacheStats() != null) {
-            registrations.add(
-                    registerMBean(whiteboard,
-                            CacheStatsMBean.class,
-                            ds.getCacheStats(),
-                            CacheStatsMBean.TYPE,
-                            ds.getCacheStats().getName())
-            );
+            for (CacheStats cacheStats : ds.getCacheStats()) {
+                registrations.add(
+                        registerMBean(whiteboard,
+                                CacheStatsMBean.class,
+                                cacheStats,
+                                CacheStatsMBean.TYPE,
+                                cacheStats.getName())
+                );
+            }
         }
 
         registrations.add(
@@ -624,12 +670,45 @@ public class DocumentNodeStoreService {
                         "Document node store management")
         );
 
+        if (mkBuilder.getBlobStoreCacheStats() != null) {
+            registrations.add(
+                    registerMBean(whiteboard,
+                            CacheStatsMBean.class,
+                            mkBuilder.getBlobStoreCacheStats(),
+                            CacheStatsMBean.TYPE,
+                            mkBuilder.getBlobStoreCacheStats().getName())
+            );
+        }
+
+        if (mkBuilder.getDocumentStoreStatsCollector() instanceof DocumentStoreStatsMBean) {
+            registrations.add(
+                    registerMBean(whiteboard,
+                            DocumentStoreStatsMBean.class,
+                            (DocumentStoreStatsMBean) mkBuilder.getDocumentStoreStatsCollector(),
+                            DocumentStoreStatsMBean.TYPE,
+                            "DocumentStore Statistics")
+            );
+        }
+
+        // register persistent cache stats
+        Map<CacheType, PersistentCacheStats> persistenceCacheStats = mkBuilder.getPersistenceCacheStats();
+        for (PersistentCacheStats pcs: persistenceCacheStats.values()) {
+            registrations.add(
+                    registerMBean(whiteboard,
+                            PersistentCacheStatsMBean.class,
+                            pcs,
+                            PersistentCacheStatsMBean.TYPE,
+                            pcs.getName())
+            );
+        }
+
+
         final long versionGcMaxAgeInSecs = toLong(prop(PROP_VER_GC_MAX_AGE), DEFAULT_VER_GC_MAX_AGE);
         final long blobGcMaxAgeInSecs = toLong(prop(PROP_BLOB_GC_MAX_AGE), DEFAULT_BLOB_GC_MAX_AGE);
 
         if (store.getBlobStore() instanceof GarbageCollectableBlobStore) {
             BlobGarbageCollector gc = store.createBlobGarbageCollector(blobGcMaxAgeInSecs, 
-                                                        ClusterRepositoryInfo.getId(mk.getNodeStore()));
+                                                        ClusterRepositoryInfo.getOrCreateId(mk.getNodeStore()));
             registrations.add(registerMBean(whiteboard, BlobGCMBean.class, new BlobGC(gc, executor),
                     BlobGCMBean.TYPE, "Document node store blob garbage collection"));
         }
@@ -647,12 +726,19 @@ public class DocumentNodeStoreService {
         registrations.add(registerMBean(whiteboard, RevisionGCMBean.class, revisionGC,
                 RevisionGCMBean.TYPE, "Document node store revision garbage collection"));
 
-        //TODO Register JMX bean for Off Heap Cache stats
+        BlobStoreStats blobStoreStats = mkBuilder.getBlobStoreStats();
+        if (!customBlobStore && blobStoreStats != null) {
+            registrations.add(registerMBean(whiteboard,
+                    BlobStoreStatsMBean.class,
+                    blobStoreStats,
+                    BlobStoreStatsMBean.TYPE,
+                    ds.getClass().getSimpleName()));
+        }
     }
 
     private void registerLastRevRecoveryJob(final DocumentNodeStore nodeStore) {
         long leaseTime = toLong(context.getProperties().get(PROP_REV_RECOVERY_INTERVAL),
-                ClusterNodeInfo.DEFAULT_LEASE_DURATION_MILLIS);
+                ClusterNodeInfo.DEFAULT_LEASE_UPDATE_INTERVAL_MILLIS);
         Runnable recoverJob = new Runnable() {
             @Override
             public void run() {
@@ -668,11 +754,14 @@ public class DocumentNodeStoreService {
                 DEFAULT_JOURNAL_GC_INTERVAL_MILLIS);
         final long journalGCMaxAge = toLong(context.getProperties().get(PROP_JOURNAL_GC_MAX_AGE_MILLIS),
                 DEFAULT_JOURNAL_GC_MAX_AGE_MILLIS);
+        final int journalGCBatchSize = toInteger(context.getProperties().get(PROP_JOURNAL_GC_BATCH_SIZE),
+                DEFAULT_JOURNAL_GC_BATCH_SIZE);
+        
         Runnable journalGCJob = new Runnable() {
 
             @Override
             public void run() {
-                nodeStore.getJournalGarbageCollector().gc(journalGCMaxAge, TimeUnit.MILLISECONDS);
+                nodeStore.getJournalGarbageCollector().gc(journalGCMaxAge, journalGCBatchSize, TimeUnit.MILLISECONDS);
             }
 
         };

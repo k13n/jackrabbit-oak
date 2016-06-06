@@ -20,7 +20,6 @@ import static org.apache.jackrabbit.oak.plugins.document.Collection.NODES;
 import static org.junit.Assert.assertTrue;
 
 import java.util.Map;
-import java.util.UUID;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 
@@ -33,7 +32,6 @@ import org.apache.jackrabbit.oak.plugins.document.rdb.RDBDataSourceFactory;
 import org.apache.jackrabbit.oak.plugins.document.rdb.RDBDocumentStore;
 import org.apache.jackrabbit.oak.plugins.document.rdb.RDBOptions;
 import org.apache.jackrabbit.oak.plugins.document.rdb.RDBRow;
-import org.apache.jackrabbit.oak.plugins.document.util.StringValue;
 import org.apache.jackrabbit.oak.plugins.document.util.Utils;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.junit.Before;
@@ -50,7 +48,7 @@ public class CacheConsistencyRDBTest extends AbstractRDBConnectionTest {
     public void setUpConnection() throws Exception {
         dataSource = RDBDataSourceFactory.forJdbcUrl(URL, USERNAME, PASSWD);
         DocumentMK.Builder builder = new DocumentMK.Builder().clock(getTestClock()).setAsyncDelay(0);
-        RDBOptions opt = new RDBOptions().tablePrefix("T" + UUID.randomUUID().toString().replace("-", "")).dropTablesOnClose(true);
+        RDBOptions opt = new RDBOptions().tablePrefix("T" + Long.toHexString(System.currentTimeMillis())).dropTablesOnClose(true);
         store = new TestStore(dataSource, builder, opt);
         mk = builder.setDocumentStore(store).setLeaseCheck(false).open();
     }
@@ -90,6 +88,7 @@ public class CacheConsistencyRDBTest extends AbstractRDBConnectionTest {
 
         // wait at most one second for background thread
         done.tryAcquire(1, TimeUnit.SECONDS);
+        store.invalidateNodeDocument(Utils.getIdFromPath("/node"));
 
         // release thread
         store.semaphores.get(t).release();
@@ -123,7 +122,7 @@ public class CacheConsistencyRDBTest extends AbstractRDBConnectionTest {
         }
 
         public void invalidateNodeDocument(String key) {
-            getNodeDocumentCache().invalidate(new StringValue(key));
+            getNodeDocumentCache().invalidate(key);
         }
     }
 }

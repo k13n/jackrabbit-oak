@@ -27,7 +27,6 @@ import static javax.jcr.observation.Event.PROPERTY_CHANGED;
 import static javax.jcr.observation.Event.PROPERTY_REMOVED;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
-import static org.junit.Assume.assumeTrue;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -48,9 +47,9 @@ import javax.jcr.observation.ObservationManager;
 
 import org.apache.jackrabbit.JcrConstants;
 import org.apache.jackrabbit.api.JackrabbitRepository;
+import org.apache.jackrabbit.oak.fixture.NodeStoreFixture;
 import org.apache.jackrabbit.oak.jcr.AbstractRepositoryTest;
 import org.apache.jackrabbit.oak.jcr.Jcr;
-import org.apache.jackrabbit.oak.jcr.NodeStoreFixture;
 import org.apache.jackrabbit.oak.jcr.repository.RepositoryImpl;
 import org.apache.jackrabbit.test.api.util.Text;
 import org.junit.After;
@@ -76,11 +75,6 @@ public class ObservationRefreshTest extends AbstractRepositoryTest {
 
     public ObservationRefreshTest(NodeStoreFixture fixture) {
         super(fixture);
-    }
-
-    {
-        // FIXME See OAK-2858
-        assumeTrue(fixture != NodeStoreFixture.DOCUMENT_RDB);
     }
 
     @Override

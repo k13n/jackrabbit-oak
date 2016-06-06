@@ -27,6 +27,7 @@ import javax.jcr.security.AccessControlManager;
 import javax.jcr.security.AccessControlPolicy;
 import javax.jcr.security.AccessControlPolicyIterator;
 
+import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableSet;
 import org.apache.jackrabbit.api.security.user.Authorizable;
 import org.apache.jackrabbit.api.security.user.Group;
@@ -35,14 +36,23 @@ import org.apache.jackrabbit.api.security.user.UserManager;
 import org.apache.jackrabbit.commons.jackrabbit.authorization.AccessControlUtils;
 import org.apache.jackrabbit.oak.AbstractSecurityTest;
 import org.apache.jackrabbit.oak.api.ContentSession;
+import org.apache.jackrabbit.oak.api.Root;
+import org.apache.jackrabbit.oak.api.Tree;
+import org.apache.jackrabbit.oak.commons.PathUtils;
 import org.apache.jackrabbit.oak.plugins.nodetype.NodeTypeConstants;
 import org.apache.jackrabbit.oak.spi.security.ConfigurationParameters;
 import org.apache.jackrabbit.oak.spi.security.SecurityProvider;
 import org.apache.jackrabbit.oak.spi.security.authorization.AuthorizationConfiguration;
 import org.apache.jackrabbit.oak.spi.security.authorization.cug.CugPolicy;
+import org.apache.jackrabbit.oak.spi.security.authorization.permission.PermissionProvider;
+import org.apache.jackrabbit.oak.spi.security.authorization.permission.TreePermission;
 import org.apache.jackrabbit.oak.spi.security.principal.EveryonePrincipal;
 import org.apache.jackrabbit.oak.spi.security.privilege.PrivilegeConstants;
 import org.apache.jackrabbit.oak.util.NodeUtil;
+import org.apache.jackrabbit.oak.util.TreeUtil;
+import org.apache.jackrabbit.util.Text;
+
+import static org.junit.Assert.assertTrue;
 
 /**
  * Base class for CUG related test that setup the authorization configuration
@@ -53,11 +63,14 @@ public class AbstractCugTest extends AbstractSecurityTest implements CugConstant
 
     static final String SUPPORTED_PATH = "/content";
     static final String SUPPORTED_PATH2 = "/content2";
+    static final String SUPPORTED_PATH3 = "/some/content/tree";
     static final String UNSUPPORTED_PATH = "/testNode";
     static final String INVALID_PATH = "/path/to/non/existing/tree";
 
+    static final String[] SUPPORTED_PATHS = {SUPPORTED_PATH, SUPPORTED_PATH2, SUPPORTED_PATH3};
+
     static final ConfigurationParameters CUG_CONFIG = ConfigurationParameters.of(
-            CugConstants.PARAM_CUG_SUPPORTED_PATHS, new String[] {SUPPORTED_PATH, SUPPORTED_PATH2},
+            CugConstants.PARAM_CUG_SUPPORTED_PATHS, SUPPORTED_PATHS,
             CugConstants.PARAM_CUG_ENABLED, true);
 
     private static final String TEST_GROUP_ID = "testGroup" + UUID.randomUUID();
@@ -67,10 +80,28 @@ public class AbstractCugTest extends AbstractSecurityTest implements CugConstant
     public void before() throws Exception {
         super.before();
 
+        /**
+         * Create tree structure:
+         *
+         * + root
+         *   + content
+         *     + subtree
+         *   + content2
+         *   + some
+         *     + content
+         *       + tree
+         *   + testNode
+         *     + child
+         */
         NodeUtil rootNode = new NodeUtil(root.getTree("/"));
+
         NodeUtil content = rootNode.addChild("content", NodeTypeConstants.NT_OAK_UNSTRUCTURED);
         content.addChild("subtree", NodeTypeConstants.NT_OAK_UNSTRUCTURED);
+
         rootNode.addChild("content2", NodeTypeConstants.NT_OAK_UNSTRUCTURED);
+
+        rootNode.addChild("some", NodeTypeConstants.NT_OAK_UNSTRUCTURED).addChild("content", NodeTypeConstants.NT_OAK_UNSTRUCTURED).addChild("tree", NodeTypeConstants.NT_OAK_UNSTRUCTURED);
+
         NodeUtil testNode = rootNode.addChild("testNode", NodeTypeConstants.NT_OAK_UNSTRUCTURED);
         testNode.addChild("child", NodeTypeConstants.NT_OAK_UNSTRUCTURED);
         root.commit();
@@ -91,9 +122,12 @@ public class AbstractCugTest extends AbstractSecurityTest implements CugConstant
             if (testUser2 != null) {
                 testUser2.remove();
             }
-            root.getTree(SUPPORTED_PATH).remove();
-            root.getTree(SUPPORTED_PATH2).remove();
-            root.getTree(UNSUPPORTED_PATH).remove();
+            for (String p : new String[] {SUPPORTED_PATH, SUPPORTED_PATH2, Text.getAbsoluteParent(SUPPORTED_PATH3, 0), UNSUPPORTED_PATH}) {
+                Tree t = root.getTree(p);
+                if (t.exists()) {
+                    t.remove();
+                }
+            }
             root.commit();
         } finally {
             super.after();
@@ -125,6 +159,8 @@ public class AbstractCugTest extends AbstractSecurityTest implements CugConstant
         ((Group) uMgr.getAuthorizable(testGroupPrincipal)).addMember(testUser2);
         root.commit();
 
+        User testUser = getTestUser();
+
         // add more child nodes
         NodeUtil n = new NodeUtil(root.getTree(SUPPORTED_PATH));
         n.addChild("a", NT_OAK_UNSTRUCTURED).addChild("b", NT_OAK_UNSTRUCTURED).addChild("c", NT_OAK_UNSTRUCTURED);
@@ -145,7 +181,7 @@ public class AbstractCugTest extends AbstractSecurityTest implements CugConstant
         // - testGroup ; allow ; jcr:read, jcr:write, jcr:readAccessControl
         AccessControlManager acMgr = getAccessControlManager(root);
         AccessControlList acl = AccessControlUtils.getAccessControlList(acMgr, "/content");
-        acl.addAccessControlEntry(getTestUser().getPrincipal(), privilegesFromNames(
+        acl.addAccessControlEntry(testUser.getPrincipal(), privilegesFromNames(
                 PrivilegeConstants.JCR_READ));
         acl.addAccessControlEntry(testGroupPrincipal, privilegesFromNames(
                         PrivilegeConstants.JCR_READ, PrivilegeConstants.REP_WRITE, PrivilegeConstants.JCR_READ_ACCESS_CONTROL)
@@ -168,6 +204,14 @@ public class AbstractCugTest extends AbstractSecurityTest implements CugConstant
         throw new IllegalStateException("Unable to create CUG at " + absPath);
     }
 
+    static void createCug(@Nonnull Root root, @Nonnull String path, @Nonnull String principalName) throws RepositoryException {
+        Tree tree = root.getTree(path);
+        Preconditions.checkState(tree.exists());
+
+        TreeUtil.addMixin(tree, MIX_REP_CUG_MIXIN, root.getTree(NODE_TYPES_PATH), null);
+        new NodeUtil(tree).addChild(REP_CUG_POLICY, NT_REP_CUG_POLICY).setStrings(REP_PRINCIPAL_NAMES, principalName);
+    }
+
     Principal getTestGroupPrincipal() throws Exception {
         UserManager uMgr = getUserManager(root);
         Group g = uMgr.getAuthorizable(TEST_GROUP_ID, Group.class);
@@ -180,5 +224,25 @@ public class AbstractCugTest extends AbstractSecurityTest implements CugConstant
 
     ContentSession createTestSession2() throws Exception {
         return login(new SimpleCredentials(TEST_USER2_ID, TEST_USER2_ID.toCharArray()));
+    }
+
+    static void assertCugPermission(@Nonnull TreePermission tp, boolean isSupportedPath) {
+        if (isSupportedPath) {
+            assertTrue(tp instanceof CugTreePermission);
+        } else {
+            assertTrue(tp instanceof EmptyCugTreePermission);
+        }
+    }
+
+    static TreePermission getTreePermission(@Nonnull Root root,
+                                            @Nonnull String path,
+                                            @Nonnull PermissionProvider pp) {
+        Tree t = root.getTree("/");
+        TreePermission tp = pp.getTreePermission(t, TreePermission.EMPTY);
+        for (String segm : PathUtils.elements(path)) {
+            t = t.getChild(segm);
+            tp = pp.getTreePermission(t, tp);
+        }
+        return tp;
     }
 }

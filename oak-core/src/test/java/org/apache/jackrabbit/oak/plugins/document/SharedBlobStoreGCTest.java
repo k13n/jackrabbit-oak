@@ -87,7 +87,7 @@ public class SharedBlobStoreGCTest {
                 .setBlobStore(blobeStore1)
                 .clock(clock)
                 .getNodeStore();
-        String repoId1 = ClusterRepositoryInfo.createId(ds1);
+        String repoId1 = ClusterRepositoryInfo.getOrCreateId(ds1);
         // Register the unique repository id in the data store
         ((SharedDataStore) blobeStore1).addMetadataRecord(new ByteArrayInputStream(new byte[0]),
             SharedStoreRecordType.REPOSITORY.getNameFromId(repoId1));
@@ -99,7 +99,7 @@ public class SharedBlobStoreGCTest {
                 .setBlobStore(blobeStore2)
                 .clock(clock)
                 .getNodeStore();
-        String repoId2 = ClusterRepositoryInfo.createId(ds2);
+        String repoId2 = ClusterRepositoryInfo.getOrCreateId(ds2);
         // Register the unique repository id in the data store
         ((SharedDataStore) blobeStore2).addMetadataRecord(new ByteArrayInputStream(new byte[0]),
             SharedStoreRecordType.REPOSITORY.getNameFromId(repoId2));
@@ -156,6 +156,9 @@ public class SharedBlobStoreGCTest {
             observedNumBlobs.add(stat.getNumLines());
             observedRepoIds.add(stat.getRepositoryId());
             Assert.assertTrue(stat.getStartTime() <= stat.getEndTime());
+            if (stat.getRepositoryId().equals(cluster1.repoId)) {
+                Assert.assertTrue(stat.isLocal());
+            }
         }
     
         Assert.assertTrue(Sets.difference(actualNumBlobs, observedNumBlobs).isEmpty());

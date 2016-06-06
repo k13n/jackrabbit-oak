@@ -51,6 +51,16 @@ tarmk.size
 : Default - 256 (in MB)
 : Maximum file size (in MB)
 
+customBlobStore
+: Default false
+: Boolean value indicating that custom `BlobStore` to use. By default it uses `MongoBlobStore`.
+
+blobGcMaxAgeInSecs
+: Default 86400 (24 hrs)
+: Blob Garbage Collector (GC) logic would only consider those blobs for GC which are not accessed recently 
+  (currentTime - lastModifiedTime > blobGcMaxAgeInSecs). For example as per default only those blobs which have
+  been created 24 hrs ago would be considered for GC
+
 <a name="document-node-store"></a>
 #### DocumentNodeStore
 
@@ -109,6 +119,11 @@ nodeCachePercentage
 : Default 25
 : Percentage of `cache` allocated for `nodeCache`. See [Caching][doc-cache]
 
+prevDocCachePercentage
+: Default 4
+: Percentage of `cache` allocated for `prevDocCache`. See [Caching][doc-cache]
+: Since 1.3.15
+
 childrenCachePercentage
 : Default 10
 : Percentage of `cache` allocated for `childrenCache`. See [Caching][doc-cache]
@@ -130,6 +145,10 @@ cacheStackMoveDistance
 : Default 16
 : The delay to move entries to the head of the queue in the LIRS cache
 : Since 1.0.15, 1.2.3, 1.3.0
+
+sharedDSRepoId (From Oak 1.2.11 & Oak 1.3.15)
+: Default ""
+: Custom SharedDataStore repositoryId. Used when custom blobstore configured. Should be unique among the repositories sharing the datastore.
 
 Example config file
 
@@ -190,6 +209,15 @@ cacheSizeInMB
 : Default - 16
 : Size in MB. In memory cache for storing small files whose size is less than `maxCachedBinarySize`. This
   helps in better performance when lots of small binaries are accessed frequently.
+
+cacheSize
+: Default - 0
+: Size in bytes of FileDataStore cache. Cache is enabled when cacheSize > 0.  Default is disabled.
+
+cachePath
+: Default - ${home.dir}/repository/datastore
+: Path of local file system cache
+
 
 #### Jackrabbit 2 - S3DataStore
 

@@ -31,13 +31,11 @@ import javax.jcr.Repository;
 import org.apache.jackrabbit.oak.Oak;
 import org.apache.jackrabbit.oak.api.ContentRepository;
 import org.apache.jackrabbit.oak.jcr.repository.RepositoryImpl;
-import org.apache.jackrabbit.oak.plugins.atomic.AtomicCounterEditorProvider;
 import org.apache.jackrabbit.oak.plugins.commit.ConflictValidatorProvider;
 import org.apache.jackrabbit.oak.plugins.index.IndexEditorProvider;
 import org.apache.jackrabbit.oak.plugins.index.counter.NodeCounterEditorProvider;
 import org.apache.jackrabbit.oak.plugins.index.nodetype.NodeTypeIndexProvider;
 import org.apache.jackrabbit.oak.plugins.index.property.OrderedPropertyIndexEditorProvider;
-import org.apache.jackrabbit.oak.plugins.index.property.OrderedPropertyIndexProvider;
 import org.apache.jackrabbit.oak.plugins.index.property.PropertyIndexEditorProvider;
 import org.apache.jackrabbit.oak.plugins.index.property.PropertyIndexProvider;
 import org.apache.jackrabbit.oak.plugins.index.reference.ReferenceEditorProvider;
@@ -48,19 +46,19 @@ import org.apache.jackrabbit.oak.plugins.name.NamespaceEditorProvider;
 import org.apache.jackrabbit.oak.plugins.nodetype.TypeEditorProvider;
 import org.apache.jackrabbit.oak.plugins.nodetype.write.InitialContent;
 import org.apache.jackrabbit.oak.plugins.observation.CommitRateLimiter;
-import org.apache.jackrabbit.oak.plugins.version.VersionEditorProvider;
+import org.apache.jackrabbit.oak.plugins.version.VersionHook;
 import org.apache.jackrabbit.oak.query.QueryEngineSettings;
 import org.apache.jackrabbit.oak.security.SecurityProviderImpl;
 import org.apache.jackrabbit.oak.spi.commit.CommitHook;
 import org.apache.jackrabbit.oak.spi.commit.CompositeConflictHandler;
 import org.apache.jackrabbit.oak.spi.commit.Editor;
-import org.apache.jackrabbit.oak.spi.commit.EditorHook;
 import org.apache.jackrabbit.oak.spi.commit.EditorProvider;
 import org.apache.jackrabbit.oak.spi.commit.Observer;
 import org.apache.jackrabbit.oak.spi.commit.PartialConflictHandler;
 import org.apache.jackrabbit.oak.spi.lifecycle.RepositoryInitializer;
 import org.apache.jackrabbit.oak.spi.query.QueryIndexProvider;
 import org.apache.jackrabbit.oak.spi.security.SecurityProvider;
+import org.apache.jackrabbit.oak.spi.state.Clusterable;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
 import org.apache.jackrabbit.oak.spi.whiteboard.Whiteboard;
 
@@ -104,33 +102,40 @@ public class Jcr {
 
     private ContentRepository contentRepository;
     private Repository repository;
+    
+    private Clusterable clusterable;
 
-    public Jcr(Oak oak) {
+    public Jcr(Oak oak, boolean initialize) {
         this.oak = oak;
 
-        with(new InitialContent());
+        if (initialize) {
+            with(new InitialContent());
 
-        with(new EditorHook(new VersionEditorProvider()));
+            with(new VersionHook());
 
-        with(new SecurityProviderImpl());
+            with(new SecurityProviderImpl());
 
-        with(new ItemSaveValidatorProvider());
-        with(new NameValidatorProvider());
-        with(new NamespaceEditorProvider());
-        with(new TypeEditorProvider());
-        with(new ConflictValidatorProvider());
-        with(new AtomicCounterEditorProvider());
-        with(new ReferenceEditorProvider());
-        with(new ReferenceIndexProvider());
+            with(new ItemSaveValidatorProvider());
+            with(new NameValidatorProvider());
+            with(new NamespaceEditorProvider());
+            with(new TypeEditorProvider());
+            with(new ConflictValidatorProvider());
 
-        with(new PropertyIndexEditorProvider());
-        with(new NodeCounterEditorProvider());
+            with(new ReferenceEditorProvider());
+            with(new ReferenceIndexProvider());
 
-        with(new PropertyIndexProvider());
-        with(new OrderedPropertyIndexProvider());
-        with(new NodeTypeIndexProvider());
+            with(new PropertyIndexEditorProvider());
+            with(new NodeCounterEditorProvider());
 
-        with(new OrderedPropertyIndexEditorProvider());
+            with(new PropertyIndexProvider());
+            with(new NodeTypeIndexProvider());
+
+            with(new OrderedPropertyIndexEditorProvider());
+        }
+    }
+
+    public Jcr(Oak oak) {
+        this(oak, true);
     }
 
     public Jcr() {
@@ -142,12 +147,25 @@ public class Jcr {
     }
 
     @Nonnull
+    public Jcr with(@Nonnull Clusterable c) {
+        ensureRepositoryIsNotCreated();
+        this.clusterable = checkNotNull(c);
+        return this;
+    }
+    
+    @Nonnull
     public final Jcr with(@Nonnull RepositoryInitializer initializer) {
         ensureRepositoryIsNotCreated();
         repositoryInitializers.add(checkNotNull(initializer));
         return this;
     }
 
+    public Jcr withAtomicCounter() {
+        ensureRepositoryIsNotCreated();
+        oak.withAtomicCounter();
+        return this;
+    }
+    
     private void ensureRepositoryIsNotCreated() {
         checkState(repository == null && contentRepository == null,
                 "Repository was already created");
@@ -341,7 +359,10 @@ public class Jcr {
         if (defaultWorkspaceName != null) {
             oak.with(defaultWorkspaceName);
         }
-
+        
+        if (clusterable != null) {
+            oak.with(clusterable);
+        }
     }
 
     @Nonnull

@@ -47,6 +47,7 @@ import org.apache.jackrabbit.oak.fixture.RepositoryFixture;
 import org.apache.jackrabbit.oak.scalability.benchmarks.AggregateNodeSearcher;
 import org.apache.jackrabbit.oak.scalability.benchmarks.ConcurrentReader;
 import org.apache.jackrabbit.oak.scalability.benchmarks.ConcurrentWriter;
+import org.apache.jackrabbit.oak.scalability.benchmarks.FacetSearcher;
 import org.apache.jackrabbit.oak.scalability.benchmarks.FormatSearcher;
 import org.apache.jackrabbit.oak.scalability.benchmarks.FullTextSearcher;
 import org.apache.jackrabbit.oak.scalability.benchmarks.LastModifiedSearcher;
@@ -144,6 +145,10 @@ public class ScalabilityRunner {
                     base.value(options), 256, cacheSize, mmap.value(options)),
                 OakRepositoryFixture.getTarWithBlobStore(
                     base.value(options), 256, cacheSize, mmap.value(options)),
+                OakRepositoryFixture.getSegmentTar(
+                        base.value(options), 256, cacheSize, mmap.value(options)),
+                OakRepositoryFixture.getSegmentTarWithBlobStore(
+                        base.value(options), 256, cacheSize, mmap.value(options)),
                 OakRepositoryFixture.getRDB(rdbjdbcuri.value(options), rdbjdbcuser.value(options),
                     rdbjdbcpasswd.value(options), rdbjdbctableprefix.value(options),
                     dropDBAfterTest.value(options), cacheSize * MB),
@@ -158,6 +163,7 @@ public class ScalabilityRunner {
                                 .addBenchmarks(new FullTextSearcher(),
                                         new NodeTypeSearcher(),
                                         new FormatSearcher(),
+                                        new FacetSearcher(),
                                         new LastModifiedSearcher(Date.LAST_2_HRS),
                                         new LastModifiedSearcher(Date.LAST_24_HRS),
                                         new LastModifiedSearcher(Date.LAST_7_DAYS),

@@ -20,7 +20,6 @@ package org.apache.jackrabbit.oak.plugins.document;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.NavigableMap;
@@ -36,11 +35,13 @@ import org.apache.jackrabbit.oak.plugins.document.util.Utils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.google.common.base.Predicate;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 
 import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.collect.Iterables.any;
 import static com.google.common.collect.Sets.filter;
 import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.COMMIT_ROOT;
 import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.DOC_SIZE_THRESHOLD;
@@ -55,7 +56,6 @@ import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.setHasBina
 import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.setPrevious;
 import static org.apache.jackrabbit.oak.plugins.document.util.Utils.PROPERTY_OR_DELETED;
 import static org.apache.jackrabbit.oak.plugins.document.util.Utils.getPreviousIdFor;
-import static org.apache.jackrabbit.oak.plugins.document.util.Utils.isRevisionNewer;
 
 /**
  * Utility class to create document split operations.
@@ -71,10 +71,12 @@ class SplitOperations {
     private final String id;
     private final Revision headRevision;
     private final RevisionContext context;
+    private final Predicate<String> isBinaryValue;
     private final int numRevsThreshold;
     private Revision high;
     private Revision low;
     private int numValues;
+    private boolean hasBinary;
     private Map<String, NavigableMap<Revision, String>> committedChanges;
     private Set<Revision> changes;
     private Map<String, Set<Revision>> garbage;
@@ -86,13 +88,15 @@ class SplitOperations {
 
     private SplitOperations(@Nonnull NodeDocument doc,
                             @Nonnull RevisionContext context,
-                            @Nonnull Revision headRevision,
+                            @Nonnull RevisionVector headRevision,
+                            @Nonnull Predicate<String> isBinaryValue,
                             int numRevsThreshold) {
         this.doc = checkNotNull(doc);
         this.context = checkNotNull(context);
+        this.isBinaryValue = checkNotNull(isBinaryValue);
         this.path = doc.getPath();
         this.id = doc.getId();
-        this.headRevision = checkNotNull(headRevision);
+        this.headRevision = checkNotNull(headRevision).getRevision(context.getClusterId());
         this.numRevsThreshold = numRevsThreshold;
     }
 
@@ -108,6 +112,9 @@ class SplitOperations {
      * @param context the revision context.
      * @param headRevision the head revision before the document was retrieved
      *                     from the document store.
+     * @param isBinaryValue a predicate that returns {@code true} if the given
+     *                      String value is considered a binary; {@code false}
+     *                      otherwise.
      * @param numRevsThreshold only split off at least this number of revisions.
      * @return list of update operations. An empty list indicates the document
      *          does not require a split.
@@ -117,13 +124,15 @@ class SplitOperations {
     @Nonnull
     static List<UpdateOp> forDocument(@Nonnull NodeDocument doc,
                                       @Nonnull RevisionContext context,
-                                      @Nonnull Revision headRevision,
+                                      @Nonnull RevisionVector headRevision,
+                                      @Nonnull Predicate<String> isBinaryValue,
                                       int numRevsThreshold) {
         if (doc.isSplitDocument()) {
             throw new IllegalArgumentException(
                     "Not a main document: " + doc.getId());
         }
-        return new SplitOperations(doc, context, headRevision, numRevsThreshold).create();
+        return new SplitOperations(doc, context, headRevision,
+                isBinaryValue, numRevsThreshold).create();
 
     }
 
@@ -175,7 +184,8 @@ class SplitOperations {
         return doc.getLocalRevisions().size() + doc.getLocalCommitRoot().size() > numRevsThreshold
                 || doc.getMemory() >= DOC_SIZE_THRESHOLD
                 || previous.size() >= PREV_SPLIT_FACTOR
-                || !doc.getStalePrev().isEmpty();
+                || !doc.getStalePrev().isEmpty()
+                || doc.hasBinary();
     }
 
     /**
@@ -190,6 +200,7 @@ class SplitOperations {
                 Revision r = splitMap.lastKey();
                 splitMap.remove(r);
                 splitRevs.addAll(splitMap.keySet());
+                hasBinary |= hasBinaryProperty(splitMap.values());
                 mostRecentRevs.add(r);
             }
             if (splitMap.isEmpty()) {
@@ -202,13 +213,17 @@ class SplitOperations {
         }
     }
 
+    private boolean hasBinaryProperty(Iterable<String> values) {
+        return doc.hasBinary() && any(values, isBinaryValue);
+    }
+
     /**
      * Collect _revisions and _commitRoot entries that can be moved to a
      * previous document.
      */
     private void collectRevisionsAndCommitRoot() {
         NavigableMap<Revision, String> revisions =
-                new TreeMap<Revision, String>(context.getRevisionComparator());
+                new TreeMap<Revision, String>(StableRevisionComparator.INSTANCE);
         for (Map.Entry<Revision, String> entry : doc.getLocalRevisions().entrySet()) {
             if (splitRevs.contains(entry.getKey())) {
                 revisions.put(entry.getKey(), entry.getValue());
@@ -232,7 +247,7 @@ class SplitOperations {
         }
         committedChanges.put(REVISIONS, revisions);
         NavigableMap<Revision, String> commitRoot =
-                new TreeMap<Revision, String>(context.getRevisionComparator());
+                new TreeMap<Revision, String>(StableRevisionComparator.INSTANCE);
         boolean mostRecent = true;
         for (Map.Entry<Revision, String> entry : doc.getLocalCommitRoot().entrySet()) {
             Revision r = entry.getKey();
@@ -242,10 +257,10 @@ class SplitOperations {
             } else if (r.getClusterId() == context.getClusterId() 
                     && !changes.contains(r)) {
                 // OAK-2528: _commitRoot entry without associated change
-                // consider all but most recent as garbage (OAK-3333)
-                if (mostRecent) {
+                // consider all but most recent as garbage (OAK-3333, OAK-4050)
+                if (mostRecent && doc.isCommitted(r)) {
                     mostRecent = false;
-                } else {
+                } else if (isGarbage(r)) {
                     addGarbage(r, COMMIT_ROOT);
                 }
             }
@@ -269,10 +284,10 @@ class SplitOperations {
                 Revision h = null;
                 Revision l = null;
                 for (Range r : entry.getValue()) {
-                    if (h == null || isRevisionNewer(context, r.high, h)) {
+                    if (h == null || r.high.compareRevisionTime(h) > 0) {
                         h = r.high;
                     }
-                    if (l == null || isRevisionNewer(context, l, r.low)) {
+                    if (l == null || l.compareRevisionTime(r.low) > 0) {
                         l = r.low;
                     }
                     removePrevious(main, r);
@@ -312,7 +327,8 @@ class SplitOperations {
         // check if we have enough data to split off
         if (high != null && low != null
                 && (numValues >= numRevsThreshold
-                || doc.getMemory() > DOC_SIZE_THRESHOLD)) {
+                || doc.getMemory() > DOC_SIZE_THRESHOLD
+                || hasBinary)) {
             // enough changes to split off
             // move to another document
             main = new UpdateOp(id, false);
@@ -341,11 +357,13 @@ class SplitOperations {
             }
             // check size of old document
             NodeDocument oldDoc = new NodeDocument(STORE);
-            UpdateUtils.applyChanges(oldDoc, old, context.getRevisionComparator());
+            UpdateUtils.applyChanges(oldDoc, old);
             setSplitDocProps(doc, oldDoc, old, high);
             // only split if enough of the data can be moved to old document
+            // or there are binaries to split off
             if (oldDoc.getMemory() > doc.getMemory() * SPLIT_RATIO
-                    || numValues >= numRevsThreshold) {
+                    || numValues >= numRevsThreshold
+                    || hasBinary) {
                 splitOps.add(old);
             } else {
                 main = null;
@@ -391,7 +409,7 @@ class SplitOperations {
             Set<Revision> changes) {
         for (String property : filter(doc.keySet(), PROPERTY_OR_DELETED)) {
             NavigableMap<Revision, String> splitMap
-                    = new TreeMap<Revision, String>(context.getRevisionComparator());
+                    = new TreeMap<Revision, String>(StableRevisionComparator.INSTANCE);
             committedLocally.put(property, splitMap);
             Map<Revision, String> valueMap = doc.getLocalMap(property);
             // collect committed changes of this cluster node
@@ -411,10 +429,9 @@ class SplitOperations {
     }
     
     private boolean isGarbage(Revision rev) {
-        Comparator<Revision> comp = context.getRevisionComparator();
         // use headRevision as passed in the constructor instead
         // of the head revision from the RevisionContext. see OAK-3081
-        if (comp.compare(headRevision, rev) <= 0) {
+        if (headRevision.compareRevisionTime(rev) <= 0) {
             // this may be an in-progress commit
             return false;
         }
@@ -489,13 +506,13 @@ class SplitOperations {
     }
 
     private void trackHigh(Revision r) {
-        if (high == null || isRevisionNewer(context, r, high)) {
+        if (high == null || r.compareRevisionTime(high) > 0) {
             high = r;
         }
     }
 
     private void trackLow(Revision r) {
-        if (low == null || isRevisionNewer(context, low, r)) {
+        if (low == null || low.compareRevisionTime(r) > 0) {
             low = r;
         }
     }

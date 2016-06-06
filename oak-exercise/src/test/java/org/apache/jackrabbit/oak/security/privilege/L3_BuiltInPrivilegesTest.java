@@ -36,7 +36,6 @@ import org.apache.jackrabbit.oak.AbstractSecurityTest;
 import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.api.ContentSession;
 import org.apache.jackrabbit.oak.api.Root;
-import org.apache.jackrabbit.oak.spi.security.privilege.PrivilegeBitsProvider;
 import org.apache.jackrabbit.oak.spi.security.privilege.PrivilegeConstants;
 import org.junit.Test;
 
@@ -71,9 +70,10 @@ import static org.junit.Assert.assertEquals;
  *
  * - {@link #testMapItems()}
  *   This allows you to become familiar with the mapping of individual privileges
- *   to items. Use the Oak API to change those items directly (instead of using
- *   the corresponding JCR API call.
- *   Use the JCR specification, the privilege definitions and {@link org.apache.jackrabbit.oak.spi.security.authorization.permission.Permissions}
+ *   to items. Use the Oak API or individual pluggins to change those items
+ *   (instead of using the corresponding JCR API call).
+ *   Use the JCR specification and the Oak security documentation to learn about
+ *   the mapping between privileges and items|operations.
  *
  *   Question: Can you map the items to the corresponding JCR API calls? (see additional exercises below)
  *   Question: Can you extract the rules when a dedicated specific privilege is
@@ -105,7 +105,6 @@ public class L3_BuiltInPrivilegesTest extends AbstractSecurityTest {
     private Root testRoot;
 
     private AccessControlManager acMgr;
-    private PrivilegeBitsProvider privilegeBitsProvider;
 
     @Override
     public void before() throws Exception {
@@ -179,7 +178,7 @@ public class L3_BuiltInPrivilegesTest extends AbstractSecurityTest {
         root.commit();
     }
 
-    public void clearAcl(AccessControlManager acMgr) throws RepositoryException, CommitFailedException {
+    private void clearAcl(AccessControlManager acMgr) throws RepositoryException, CommitFailedException {
         AccessControlPolicy[] policies = acMgr.getPolicies("/");
         for (AccessControlPolicy policy : policies) {
             acMgr.removePolicy("/", policy);

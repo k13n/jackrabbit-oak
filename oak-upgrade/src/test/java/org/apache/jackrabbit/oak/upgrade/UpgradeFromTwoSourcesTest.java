@@ -16,22 +16,23 @@
  */
 package org.apache.jackrabbit.oak.upgrade;
 
+import java.io.File;
+import java.io.IOException;
+
+import javax.jcr.RepositoryException;
+import javax.jcr.Session;
+
 import org.apache.jackrabbit.commons.JcrUtils;
 import org.apache.jackrabbit.core.RepositoryContext;
 import org.apache.jackrabbit.core.RepositoryImpl;
 import org.apache.jackrabbit.core.config.RepositoryConfig;
-import org.apache.jackrabbit.oak.plugins.segment.SegmentNodeStore;
-import org.apache.jackrabbit.oak.plugins.segment.file.FileStore;
+import org.apache.jackrabbit.oak.segment.SegmentNodeStoreBuilders;
+import org.apache.jackrabbit.oak.segment.file.FileStore;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
 import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
-
-import javax.jcr.RepositoryException;
-import javax.jcr.Session;
-import java.io.File;
-import java.io.IOException;
 
 /**
  * Test case that simulates copying different paths from two source repositories
@@ -44,7 +45,7 @@ public class UpgradeFromTwoSourcesTest extends AbstractRepositoryUpgradeTest {
 
     @Override
     protected NodeStore createTargetNodeStore() {
-        return new SegmentNodeStore(fileStore);
+        return SegmentNodeStoreBuilders.builder(fileStore).build();
     }
 
     @BeforeClass
@@ -52,7 +53,7 @@ public class UpgradeFromTwoSourcesTest extends AbstractRepositoryUpgradeTest {
         final File dir = new File(getTestDirectory(), "segments");
         dir.mkdirs();
         try {
-            fileStore = FileStore.newFileStore(dir).withMaxFileSize(128).create();
+            fileStore = FileStore.builder(dir).withMaxFileSize(128).build();
             upgradeComplete = false;
         } catch (IOException e) {
             throw new RuntimeException(e);

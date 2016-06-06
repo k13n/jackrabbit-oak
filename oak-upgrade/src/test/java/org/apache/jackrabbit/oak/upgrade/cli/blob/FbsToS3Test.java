@@ -16,12 +16,14 @@
  */
 package org.apache.jackrabbit.oak.upgrade.cli.blob;
 
+import java.io.IOException;
+
 import org.apache.jackrabbit.oak.upgrade.cli.AbstractOak2OakTest;
 import org.apache.jackrabbit.oak.upgrade.cli.container.BlobStoreContainer;
 import org.apache.jackrabbit.oak.upgrade.cli.container.FileBlobStoreContainer;
 import org.apache.jackrabbit.oak.upgrade.cli.container.NodeStoreContainer;
 import org.apache.jackrabbit.oak.upgrade.cli.container.S3DataStoreContainer;
-import org.apache.jackrabbit.oak.upgrade.cli.container.SegmentNodeStoreContainer;
+import org.apache.jackrabbit.oak.upgrade.cli.container.SegmentTarNodeStoreContainer;
 import org.junit.Assume;
 
 public class FbsToS3Test extends AbstractOak2OakTest {
@@ -36,12 +38,12 @@ public class FbsToS3Test extends AbstractOak2OakTest {
 
     private final NodeStoreContainer destination;
 
-    public FbsToS3Test() {
+    public FbsToS3Test() throws IOException {
         Assume.assumeTrue(S3_PROPERTIES != null);
         sourceBlob = new FileBlobStoreContainer();
         destinationBlob = new S3DataStoreContainer(S3_PROPERTIES);
-        source = new SegmentNodeStoreContainer(sourceBlob);
-        destination = new SegmentNodeStoreContainer(destinationBlob);
+        source = new SegmentTarNodeStoreContainer(sourceBlob);
+        destination = new SegmentTarNodeStoreContainer(destinationBlob);
     }
 
     @Override

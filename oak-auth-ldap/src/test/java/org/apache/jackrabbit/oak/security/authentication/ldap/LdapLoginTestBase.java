@@ -162,7 +162,7 @@ public abstract class LdapLoginTestBase extends ExternalLoginModuleTestBase {
     }
 
     @Override
-    protected void destroyIDP(ExternalIdentityProvider idp) {
+    protected void destroyIDP() {
         ((LdapIdentityProvider) idp).close();
     }
 
@@ -274,7 +274,7 @@ public abstract class LdapLoginTestBase extends ExternalLoginModuleTestBase {
             cs = login(new SimpleCredentials(USER_ID, USER_PWD.toCharArray()));
 
             root.refresh();
-             user = userManager.getAuthorizable(USER_ID);
+            user = userManager.getAuthorizable(USER_ID);
             assertNotNull(user);
             assertTrue(user.hasProperty(USER_PROP));
             assertNull(userManager.getAuthorizable(GROUP_DN));

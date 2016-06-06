@@ -17,6 +17,7 @@
 package org.apache.jackrabbit.oak.query.xpath;
 
 import org.apache.jackrabbit.oak.commons.PathUtils;
+import org.apache.jackrabbit.oak.query.xpath.Statement.UnionStatement;
 import org.apache.jackrabbit.util.ISO9075;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,6 +30,23 @@ import java.util.ArrayList;
  * This class can can convert a XPATH query to a SQL2 query.
  */
 public class XPathToSQL2Converter {
+    
+    /**
+     * Optimize queries of the form "from [nt:base] where [jcr:primaryType] = 'x'" 
+     * to "from [x] where [jcr:primaryType] = 'x'".
+     * Enabled by default.
+     */
+    public static final boolean NODETYPE_OPTIMIZATION = Boolean.parseBoolean(
+            System.getProperty("oak.xpathNodeTypeOptimization", "true"));
+    
+    /**
+     * Convert queries of the form "where [jcr:primaryType] = 'x' or [jcr:primaryType] = 'y'"
+     * to "select ... where [jcr:primaryType] = 'x' union select ... where [jcr:primaryType] = 'y'". 
+     * If disabled, only one query with "where [jcr:primaryType] in ('x', 'y') is used.
+     * Enabled by default.
+     */
+    public static final boolean NODETYPE_UNION = Boolean.parseBoolean(
+            System.getProperty("oak.xpathNodeTypeUnion", "true"));
 
     static final Logger LOG = LoggerFactory.getLogger(XPathToSQL2Converter.class);
 
@@ -63,6 +81,12 @@ public class XPathToSQL2Converter {
      * @throws ParseException if parsing fails
      */
     public String convert(String query) throws ParseException {
+        Statement statement = convertToStatement(query);
+        statement = statement.optimize();
+        return statement.toString();
+    }
+    
+    private Statement convertToStatement(String query) throws ParseException {
         
         query = query.trim();
         
@@ -138,6 +162,10 @@ public class XPathToSQL2Converter {
             } else if (readIf("/")) {
                 // "//" was read
                 pathPattern += "%";
+                if (currentSelector.isDescendant) {
+                    // the query started with "//", and now "//" was read
+                    nextSelector(true);
+                }
                 currentSelector.isDescendant = true;
             } else {
                 // the token "/" was read
@@ -145,9 +173,14 @@ public class XPathToSQL2Converter {
                 if (startOfQuery) {
                     currentSelector.path = "/";
                 } else {
+                    if (currentSelector.isDescendant) {
+                        // the query started with "//", and now "/" was read
+                        nextSelector(true);
+                    }
                     currentSelector.isChild = true;
                 }
             }
+            int startParseIndex = parseIndex;
             if (shortcut) {
                 // "*" and so on are not allowed now
             } else if (readIf("*")) {
@@ -159,45 +192,56 @@ public class XPathToSQL2Converter {
                         currentSelector.path = "/";
                     }
                 }
-            } else if (readIf("text")) {
-                // "...text()"
-                currentSelector.isChild = false;
-                pathPattern += "jcr:xmltext";
-                read("(");
-                read(")");
-                if (currentSelector.isDescendant) {
-                    currentSelector.nodeName = "jcr:xmltext";
-                } else {
-                    currentSelector.path = PathUtils.concat(currentSelector.path, "jcr:xmltext");
-                }
-            } else if (readIf("element")) {
-                // "...element(..."
-                read("(");
-                if (readIf(")")) {
-                    // any
-                    pathPattern += "%";
-                } else {
-                    if (readIf("*")) {
-                        // any
-                        pathPattern += "%";
+            } else if (currentTokenType == IDENTIFIER) {
+                // probably a path restriction
+                // String name = readPathSegment();
+                String identifier = readIdentifier();
+                if (readIf("(")) {
+                    if ("text".equals(identifier)) {
+                        // "...text()"
+                        currentSelector.isChild = false;
+                        pathPattern += "jcr:xmltext";
+                        read(")");
+                        if (currentSelector.isDescendant) {
+                            currentSelector.nodeName = "jcr:xmltext";
+                        } else {
+                            currentSelector.path = PathUtils.concat(currentSelector.path, "jcr:xmltext");
+                        }                        
+                    } else if ("element".equals(identifier)) {
+                        // "...element(..."
+                        if (readIf(")")) {
+                            // any
+                            pathPattern += "%";
+                        } else {
+                            if (readIf("*")) {
+                                // any
+                                pathPattern += "%";
+                            } else {
+                                String name = readPathSegment();
+                                pathPattern += name;
+                                appendNodeName(name);
+                            }
+                            if (readIf(",")) {
+                                currentSelector.nodeType = readIdentifier();
+                            }
+                            read(")");
+                        }
+                    } else if ("rep:excerpt".equals(identifier)) {
+                        readOpenDotClose(false);
+                        rewindSelector();
+                        Expression.Property p = new Expression.Property(currentSelector, "rep:excerpt", false);
+                        statement.addSelectColumn(p);
                     } else {
-                        String name = readPathSegment();
-                        pathPattern += name;
-                        appendNodeName(name);
+                        throw getSyntaxError();
                     }
-                    if (readIf(",")) {
-                        currentSelector.nodeType = readIdentifier();
-                    }
-                    read(")");
+                } else {
+                    String name = ISO9075.decode(identifier);
+                    pathPattern += name;
+                    appendNodeName(name);
                 }
             } else if (readIf("@")) {
                 rewindSelector();
                 Expression.Property p = readProperty();
-                statement.addSelectColumn(p);
-            } else if (readIf("rep:excerpt")) {
-                rewindSelector();
-                readExcerpt();
-                Expression.Property p = new Expression.Property(currentSelector, "rep:excerpt", false);
                 statement.addSelectColumn(p);
             } else if (readIf("(")) {
                 rewindSelector();
@@ -206,7 +250,7 @@ public class XPathToSQL2Converter {
                         Expression.Property p = readProperty();
                         statement.addSelectColumn(p);
                     } else if (readIf("rep:excerpt")) {
-                        readExcerpt();
+                        readOpenDotClose(true);
                         Expression.Property p = new Expression.Property(currentSelector, "rep:excerpt", false);
                         statement.addSelectColumn(p);
                     } else if (readIf("rep:spellcheck")) {
@@ -216,17 +260,14 @@ public class XPathToSQL2Converter {
                         Expression.Property p = new Expression.Property(currentSelector, "rep:spellcheck()", false);
                         statement.addSelectColumn(p);
                     } else if (readIf("rep:suggest")) {
-                        readExcerpt();
+                        readOpenDotClose(true);
                         Expression.Property p = new Expression.Property(currentSelector, "rep:suggest()", false);
                         statement.addSelectColumn(p);
                     }
                 } while (readIf("|"));
-                read(")");
-            } else if (currentTokenType == IDENTIFIER) {
-                // path restriction
-                String name = readPathSegment();
-                pathPattern += name;
-                appendNodeName(name);
+                if (!readIf(")")) {
+                    return convertToUnion(query, statement, startParseIndex - 1);
+                }
             } else if (readIf(".")) {
                 // just "." this is simply ignored, so that
                 // "a/./b" is the same as "a/b"
@@ -294,11 +335,7 @@ public class XPathToSQL2Converter {
             where = Expression.and(where, s.condition);
         }
         statement.setWhere(where);
-        
-        statement = statement.optimize();
-        
-        return statement.toString();
-
+        return statement;
     }
     
     private void appendNodeName(String name) {
@@ -686,13 +723,19 @@ public class XPathToSQL2Converter {
         return new Expression.Property(currentSelector, readPathSegment(), false);
     }
     
-    private void readExcerpt() throws ParseException {
-        read("(");
-        if (!readIf(")")) {
-            // only rep:excerpt(.) and rep:excerpt() are currently supported
-            read(".");
-            read(")");
+    /**
+     * Read open bracket (optional), and optional dot, and close bracket.
+     * 
+     * @param readOpenBracket whether to read the open bracket (false if this
+     *            was already read)
+     * @throws ParseException if close bracket or the dot were not read
+     */
+    private void readOpenDotClose(boolean readOpenBracket) throws ParseException {
+        if (readOpenBracket) {
+            read("(");
         }
+        readIf(".");
+        read(")");
     }
 
     private String readPathSegment() throws ParseException {
@@ -1003,6 +1046,57 @@ public class XPathToSQL2Converter {
             query += "; expected: " + expected;
         }
         return new ParseException("Query:\n" + query, index);
+    }
+    
+    private Statement convertToUnion(String query, Statement statement,
+            int startParseIndex) throws ParseException {
+        int start = query.indexOf("(", startParseIndex);
+        String begin = query.substring(0, start);
+        XPathToSQL2Converter converter = new XPathToSQL2Converter();
+        String partList = query.substring(start);
+        converter.initialize(partList);
+        converter.read();
+        int lastParseIndex = converter.parseIndex;
+        int lastOrIndex = lastParseIndex;
+        converter.read("(");
+        int level = 0;
+        ArrayList<String> parts = new ArrayList<String>();
+        while (true) {
+            int parseIndex = converter.parseIndex;
+            if (converter.readIf("(")) {
+                level++;
+            } else if (converter.readIf(")") && level-- <= 0) {
+                break;
+            } else if (converter.readIf("|") && level == 0) {
+                String or = partList.substring(lastOrIndex, lastParseIndex);
+                parts.add(or);
+                lastOrIndex = parseIndex;
+            } else if (currentTokenType == END) {
+                throw getSyntaxError("the query may not be empty");
+            } else {
+                converter.read();
+            }
+            lastParseIndex = parseIndex;
+        }
+        String or = partList.substring(lastOrIndex, lastParseIndex);
+        parts.add(or);        
+        String end = partList.substring(lastParseIndex + 1);
+        Statement result = null;
+        for(String p : parts) {
+            String q = begin + p + end;
+            converter = new XPathToSQL2Converter();
+            Statement stat = converter.convertToStatement(q);
+            if (result == null) {
+                result = stat;
+            } else {
+                UnionStatement union = new UnionStatement(result, stat);
+                union.orderList = stat.orderList;
+                result = union;
+            }
+            // can not use clear, because it is shared
+            stat.orderList = new ArrayList<Order>();
+        }
+        return result;
     }
 
 }
