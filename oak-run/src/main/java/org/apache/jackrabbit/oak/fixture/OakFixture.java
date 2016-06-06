@@ -201,7 +201,11 @@ public abstract class OakFixture {
                             setLogging(false);
                     setupBlobStore(mkBuilder);
                     kernels[i] = mkBuilder.open();
-                    cluster[i] = newOak(kernels[i].getNodeStore());
+                    if (i == 0) {
+                        cluster[i] = newOak(kernels[i].getNodeStore());
+                    } else {
+                        cluster[i] = new Oak(kernels[i].getNodeStore());
+                    }
                 }
                 return cluster;
             }
