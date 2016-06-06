@@ -94,6 +94,8 @@ public abstract class AbstractTest<T> extends Benchmark implements CSVResultGene
 
     private Map<Long, Repository> randomClusterNodes;
 
+    private boolean warmingUp;
+
     /**
      * <p>
      * used to signal the {@link #runTest(int)} if stop running future test planned or not. If set
@@ -216,7 +218,8 @@ public abstract class AbstractTest<T> extends Benchmark implements CSVResultGene
 
         setUp(cluster, CREDENTIALS);
         try {
-            
+
+            warmingUp = true;
             // Run a few iterations to warm up the system
             long warmupEnd = System.currentTimeMillis() + WARMUP;
             boolean stop = false;
@@ -228,6 +231,7 @@ public abstract class AbstractTest<T> extends Benchmark implements CSVResultGene
                 }
                 execute();
             }
+            warmingUp = false;
 
             if (concurrencyLevels == null || concurrencyLevels.isEmpty()) {
                 concurrencyLevels = Arrays.asList(1);
@@ -622,4 +626,7 @@ public abstract class AbstractTest<T> extends Benchmark implements CSVResultGene
         return fixture.setUpCluster(1);
     }
 
+    protected boolean isWarmingUp() {
+        return warmingUp;
+    }
 }

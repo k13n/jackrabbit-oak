@@ -93,12 +93,14 @@ public abstract class IndexConflictsTest extends AbstractTest<Void> {
         long threadId = Thread.currentThread().getId();
 
         // obtain a node counter for this specific client (thread)
-        AtomicInteger nodeCounter;
-        synchronized (nodeCounters) {
-            nodeCounter = nodeCounters.get(threadId);
-            if (nodeCounter == null) {
-                nodeCounter = new AtomicInteger();
-                nodeCounters.put(threadId, nodeCounter);
+        AtomicInteger nodeCounter = null;
+        if (!isWarmingUp()) {
+            synchronized (nodeCounters) {
+                nodeCounter = nodeCounters.get(threadId);
+                if (nodeCounter == null) {
+                    nodeCounter = new AtomicInteger();
+                    nodeCounters.put(threadId, nodeCounter);
+                }
             }
         }
 
@@ -116,21 +118,26 @@ public abstract class IndexConflictsTest extends AbstractTest<Void> {
                 Node newNode = rootNode.addNode(nodeName, NODE_TYPE);
                 newNode.setProperty(INDEXED_PROPERTY, propertyValue());
                 session.save();
-                nodeCounter.incrementAndGet();
+
+                if (!isWarmingUp()) {
+                    nodeCounter.incrementAndGet();
+                }
 
                 // remove the newly created node
                 newNode.remove();
                 session.save();
             } catch (RepositoryException e) {
-                synchronized (errorCounter) {
-                    Integer counter = errorCounter.get(e.getClass());
-                    if (counter == null) {
-                        counter = 0;
+                if (!isWarmingUp()) {
+                    synchronized (errorCounter) {
+                        Integer counter = errorCounter.get(e.getClass());
+                        if (counter == null) {
+                            counter = 0;
+                        }
+                        errorCounter.put(e.getClass(), counter + 1);
                     }
-                    errorCounter.put(e.getClass(), counter + 1);
-                }
-                if (VERBOSE) {
-                    e.printStackTrace();
+                    if (VERBOSE) {
+                        e.printStackTrace();
+                    }
                 }
             }
         }
