@@ -27,13 +27,6 @@ import static com.google.common.base.Preconditions.checkArgument;
 public class SegmentGCOptions {
 
     /**
-     * Default options: {@link #PAUSE_DEFAULT}, {@link #MEMORY_THRESHOLD_DEFAULT},
-     * {@link #GAIN_THRESHOLD_DEFAULT}, {@link #RETRY_COUNT_DEFAULT},
-     * {@link #FORCE_AFTER_FAIL_DEFAULT}, {@link #LOCK_WAIT_TIME_DEFAULT}.
-     */
-    public static final SegmentGCOptions DEFAULT = new SegmentGCOptions();
-
-    /**
      * Default value for {@link #isPaused()}
      */
     public static final boolean PAUSE_DEFAULT = false;
@@ -84,6 +77,16 @@ public class SegmentGCOptions {
 
     private boolean offline = false;
 
+    private boolean ocBinDeduplication = Boolean
+            .getBoolean("oak.segment.compaction.binaryDeduplication");
+
+    private long ocBinMaxSize = Long.getLong(
+            "oak.segment.compaction.binaryDeduplicationMaxSize",
+            100 * 1024 * 1024);
+
+    private long gcSizeDeltaEstimation = Long.getLong(
+            "oak.segment.compaction.gcSizeDeltaEstimation", -1);
+
     public SegmentGCOptions(boolean paused, int memoryThreshold, int gainThreshold,
                             int retryCount, boolean forceAfterFail, int lockWaitTime) {
         this.paused = paused;
@@ -97,6 +100,15 @@ public class SegmentGCOptions {
     public SegmentGCOptions() {
         this(PAUSE_DEFAULT, MEMORY_THRESHOLD_DEFAULT, GAIN_THRESHOLD_DEFAULT,
                 RETRY_COUNT_DEFAULT, FORCE_AFTER_FAIL_DEFAULT, LOCK_WAIT_TIME_DEFAULT);
+    }
+
+    /**
+     * Default options: {@link #PAUSE_DEFAULT}, {@link #MEMORY_THRESHOLD_DEFAULT},
+     * {@link #GAIN_THRESHOLD_DEFAULT}, {@link #RETRY_COUNT_DEFAULT},
+     * {@link #FORCE_AFTER_FAIL_DEFAULT}, {@link #LOCK_WAIT_TIME_DEFAULT}.
+     */
+    public static SegmentGCOptions defaultGCOptions() {
+        return new SegmentGCOptions();
     }
 
     /**
@@ -240,15 +252,23 @@ public class SegmentGCOptions {
 
     @Override
     public String toString() {
-        return getClass().getSimpleName() + "{" +
-                "paused=" + paused +
-                ", memoryThreshold=" + memoryThreshold +
-                ", gainThreshold=" + gainThreshold +
-                ", retryCount=" + retryCount +
-                ", forceAfterFail=" + forceAfterFail +
-                ", lockWaitTime=" + lockWaitTime +
-                ", retainedGenerations=" + retainedGenerations +
-                ", offline=" + offline + "}";
+        if (offline) {
+            return getClass().getSimpleName() + "{" +
+                    "offline=" + offline +
+                    ", retainedGenerations=" + retainedGenerations +
+                    ", ocBinDeduplication=" + ocBinDeduplication +
+                    ", ocBinMaxSize=" + ocBinMaxSize + "}";
+        } else {
+            return getClass().getSimpleName() + "{" +
+                    "paused=" + paused +
+                    ", memoryThreshold=" + memoryThreshold +
+                    ", gainThreshold=" + gainThreshold +
+                    ", retryCount=" + retryCount +
+                    ", forceAfterFail=" + forceAfterFail +
+                    ", lockWaitTime=" + lockWaitTime +
+                    ", retainedGenerations=" + retainedGenerations +
+                    ", gcSizeDeltaEstimation=" + gcSizeDeltaEstimation + "}";
+        }
     }
 
     /**
@@ -277,6 +297,50 @@ public class SegmentGCOptions {
     public SegmentGCOptions setOffline() {
         this.offline = true;
         this.retainedGenerations = 1;
+        return this;
+    }
+
+    /**
+     * Offline compaction only. Enables content based de-duplication of
+     * binaries. Involves a fair amount of I/O when reading/comparing
+     * potentially equal blobs. set via the
+     * 'oak.segment.compaction.binaryDeduplication' system property
+     * @return this instance.
+     */
+    public SegmentGCOptions withBinaryDeduplication() {
+        this.ocBinDeduplication = true;
+        return this;
+    }
+
+    public boolean isBinaryDeduplication() {
+        return this.ocBinDeduplication;
+    }
+
+    /**
+     * Offline compaction only. Set the upper bound for the content based
+     * de-duplication checks.
+     * @param binMaxSize
+     * @return this instance
+     */
+    public SegmentGCOptions setBinaryDeduplicationMaxSize(long binMaxSize) {
+        this.ocBinMaxSize = binMaxSize;
+        return this;
+    }
+
+    public long getBinaryDeduplicationMaxSize() {
+        return this.ocBinMaxSize;
+    }
+
+    public boolean isGcSizeDeltaEstimation() {
+        return gcSizeDeltaEstimation >= 0;
+    }
+
+    public long getGcSizeDeltaEstimation() {
+        return gcSizeDeltaEstimation;
+    }
+
+    public SegmentGCOptions setGcSizeDeltaEstimation(long gcSizeDeltaEstimation) {
+        this.gcSizeDeltaEstimation = gcSizeDeltaEstimation;
         return this;
     }
 }

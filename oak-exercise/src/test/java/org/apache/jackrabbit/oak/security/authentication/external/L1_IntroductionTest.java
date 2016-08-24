@@ -20,28 +20,19 @@ import org.apache.jackrabbit.oak.AbstractSecurityTest;
 
 /**
  * <pre>
- * Module: Authentication
+ * Module: External Authentication
  * =============================================================================
  *
  * Title: Introduction
  * -----------------------------------------------------------------------------
  *
  * Goal:
- * TODO
+ * Understand the fundamental concepts of the oak-auth-external module.
  *
  * Exercises:
  *
  * - {@link #TODO}
  *
- *
- * Additional Exercises:
- * -----------------------------------------------------------------------------
- *
- * TODO
- *
- * </pre>
- *
- * @see TODO
  */
 public class L1_IntroductionTest extends AbstractSecurityTest {
 

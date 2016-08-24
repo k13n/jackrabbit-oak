@@ -18,8 +18,7 @@
  */
 package org.apache.jackrabbit.oak.segment.memory;
 
-import static org.apache.jackrabbit.oak.segment.SegmentVersion.LATEST_VERSION;
-import static org.apache.jackrabbit.oak.segment.SegmentWriters.pooledSegmentWriter;
+import static org.apache.jackrabbit.oak.segment.SegmentWriterBuilder.segmentWriterBuilder;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -28,14 +27,17 @@ import java.util.concurrent.ConcurrentMap;
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 
-import com.google.common.base.Suppliers;
+import com.google.common.base.Supplier;
 import com.google.common.collect.Maps;
+import org.apache.jackrabbit.oak.segment.BinaryReferenceConsumer;
+import org.apache.jackrabbit.oak.segment.BinaryReferenceConsumers;
+import org.apache.jackrabbit.oak.segment.CachingSegmentReader;
 import org.apache.jackrabbit.oak.segment.Revisions;
 import org.apache.jackrabbit.oak.segment.Segment;
 import org.apache.jackrabbit.oak.segment.SegmentId;
+import org.apache.jackrabbit.oak.segment.SegmentIdFactory;
 import org.apache.jackrabbit.oak.segment.SegmentNotFoundException;
 import org.apache.jackrabbit.oak.segment.SegmentReader;
-import org.apache.jackrabbit.oak.segment.SegmentReaders;
 import org.apache.jackrabbit.oak.segment.SegmentStore;
 import org.apache.jackrabbit.oak.segment.SegmentTracker;
 import org.apache.jackrabbit.oak.segment.SegmentWriter;
@@ -47,7 +49,7 @@ import org.apache.jackrabbit.oak.spi.blob.BlobStore;
 public class MemoryStore implements SegmentStore {
 
     @Nonnull
-    private final SegmentTracker tracker = new SegmentTracker(this);
+    private final SegmentTracker tracker = new SegmentTracker();
 
     @Nonnull
     private final MemoryStoreRevisions revisions;
@@ -58,14 +60,29 @@ public class MemoryStore implements SegmentStore {
     @Nonnull
     private final SegmentWriter segmentWriter;
 
+    private final SegmentIdFactory segmentIdFactory = new SegmentIdFactory() {
+
+        @Override
+        @Nonnull
+        public SegmentId newSegmentId(long msb, long lsb) {
+            return new SegmentId(MemoryStore.this, msb, lsb);
+        }
+
+    };
+
     private final ConcurrentMap<SegmentId, Segment> segments =
             Maps.newConcurrentMap();
 
     public MemoryStore() throws IOException {
         this.revisions = new MemoryStoreRevisions();
-        this.segmentReader = SegmentReaders.segmentReader(this, 16);
-        this.segmentWriter = pooledSegmentWriter(this,
-                LATEST_VERSION, "sys", Suppliers.ofInstance(0));
+        Supplier<SegmentWriter> getWriter = new Supplier<SegmentWriter>() {
+            @Override
+            public SegmentWriter get() {
+                return getWriter();
+            }
+        };
+        this.segmentReader = new CachingSegmentReader(getWriter, null, 16, 2);
+        this.segmentWriter = segmentWriterBuilder("sys").withWriterPool().build(this);
         revisions.bind(this);
         segmentWriter.flush();
     }
@@ -90,6 +107,11 @@ public class MemoryStore implements SegmentStore {
         return revisions;
     }
 
+    @Nonnull
+    public BinaryReferenceConsumer getBinaryReferenceConsumer() {
+        return BinaryReferenceConsumers.newDiscardBinaryReferenceConsumer();
+    }
+
     @Override
     public boolean containsSegment(SegmentId id) {
         return id.sameStore(this) || segments.containsKey(id);
@@ -105,12 +127,30 @@ public class MemoryStore implements SegmentStore {
     }
 
     @Override
+    @Nonnull
+    public SegmentId newSegmentId(long msb, long lsb) {
+        return tracker.newSegmentId(msb, lsb, segmentIdFactory);
+    }
+
+    @Override
+    @Nonnull
+    public SegmentId newBulkSegmentId() {
+        return tracker.newBulkSegmentId(segmentIdFactory);
+    }
+
+    @Override
+    @Nonnull
+    public SegmentId newDataSegmentId() {
+        return tracker.newDataSegmentId(segmentIdFactory);
+    }
+
+    @Override
     public void writeSegment(
             SegmentId id, byte[] data, int offset, int length) throws IOException {
         ByteBuffer buffer = ByteBuffer.allocate(length);
         buffer.put(data, offset, length);
         buffer.rewind();
-        Segment segment = new Segment(tracker, segmentReader, id, buffer);
+        Segment segment = new Segment(this, segmentReader, id, buffer);
         if (segments.putIfAbsent(id, segment) != null) {
             throw new IOException("Segment override: " + id);
         }

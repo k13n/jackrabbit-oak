@@ -60,7 +60,6 @@ public class Commit {
     private static final Logger LOG = LoggerFactory.getLogger(Commit.class);
 
     protected final DocumentNodeStore nodeStore;
-    private final DocumentNodeStoreBranch branch;
     private final RevisionVector baseRevision;
     private final Revision revision;
     private final HashMap<String, UpdateOp> operations = new LinkedHashMap<String, UpdateOp>();
@@ -87,18 +86,13 @@ public class Commit {
      * @param revision the revision for this commit.
      * @param baseRevision the base revision for this commit or {@code null} if
      *                     there is none.
-     * @param branch the branch associated with this commit or {@code null} if
-     *               there is none.
-     *                              
      */
     Commit(@Nonnull DocumentNodeStore nodeStore,
            @Nonnull Revision revision,
-           @Nullable RevisionVector baseRevision,
-           @Nullable DocumentNodeStoreBranch branch) {
+           @Nullable RevisionVector baseRevision) {
         this.nodeStore = checkNotNull(nodeStore);
         this.revision = checkNotNull(revision);
         this.baseRevision = baseRevision;
-        this.branch = branch;
     }
 
     UpdateOp getUpdateOperationForNode(String path) {
@@ -125,9 +119,9 @@ public class Commit {
 
     /**
      * Returns the base revision for this commit. That is, the revision passed
-     * to {@link DocumentMK#commit(String, String, String, String)}. The base
-     * revision may be <code>null</code>, e.g. for the initial commit of the
-     * root node, when there is no base revision.
+     * to {@link DocumentNodeStore#newCommit}. The base revision may be
+     * <code>null</code>, e.g. for the initial commit of the root node, when
+     * there is no base revision.
      *
      * @return the base revision of this commit or <code>null</code>.
      */
@@ -181,28 +175,13 @@ public class Commit {
         boolean isBranch = baseRev != null && baseRev.isBranch();
         Revision rev = getRevision();
         if (isBranch && !nodeStore.isDisableBranches()) {
-            rev = rev.asBranchRevision();
-            // remember branch commit
-            Branch b = nodeStore.getBranches().getBranch(baseRev);
-            if (b == null) {
-                // baseRev is marker for new branch
-                b = nodeStore.getBranches().create(
-                        baseRev.asTrunkRevision(), rev, branch);
-                LOG.debug("Branch created with base revision {} and " +
-                        "modifications on {}", baseRevision, operations.keySet());
-                if (LOG.isTraceEnabled()) {
-                    LOG.trace("Branch created", new Exception());
-                }
-            } else {
-                b.addCommit(rev);
-            }
             try {
                 // prepare commit
                 prepare(baseRev);
                 success = true;
             } finally {
                 if (!success) {
-                    b.removeCommit(rev);
+                    b.removeCommit(rev.asBranchRevision());
                     if (!b.hasCommits()) {
                         nodeStore.getBranches().remove(b);
                     }
@@ -647,7 +626,9 @@ public class Commit {
             }
             list.add(p);
         }
-        RevisionVector after = before.update(revision);
+        // the commit revision with branch flag if this is a branch commit
+        Revision rev = isBranchCommit ? revision.asBranchRevision() : revision;
+        RevisionVector after = before.update(rev);
         DiffCache.Entry cacheEntry = nodeStore.getDiffCache().newEntry(before, after, true);
         LastRevTracker tracker = nodeStore.createTracker(revision, isBranchCommit);
         List<String> added = new ArrayList<String>();
@@ -675,7 +656,7 @@ public class Commit {
                 // track intermediate node and root
                 tracker.track(path);
             }
-            nodeStore.applyChanges(after, path, isNew,
+            nodeStore.applyChanges(before, after, rev, path, isNew,
                     added, removed, changed, cacheEntry);
         }
         cacheEntry.done();

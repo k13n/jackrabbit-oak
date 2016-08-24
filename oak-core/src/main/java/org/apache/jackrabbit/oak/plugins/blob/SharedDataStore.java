@@ -16,9 +16,12 @@
  */
 package org.apache.jackrabbit.oak.plugins.blob;
 
+import java.io.File;
 import java.io.InputStream;
+import java.util.Iterator;
 import java.util.List;
 
+import org.apache.jackrabbit.core.data.DataIdentifier;
 import org.apache.jackrabbit.core.data.DataRecord;
 import org.apache.jackrabbit.core.data.DataStoreException;
 
@@ -38,11 +41,20 @@ public interface SharedDataStore {
      * 
      * @param stream the stream
      * @param name the name of the root record
-     * @return the data record
      * @throws DataStoreException the data store exception
      */
     void addMetadataRecord(InputStream stream, String name)
             throws DataStoreException;
+
+    /**
+     * Adds the root record.
+     *
+     * @param f the file
+     * @param name the name of the root record
+     * @throws DataStoreException the data store exception
+     */
+    void addMetadataRecord(File f, String name)
+        throws DataStoreException;
 
     /**
      * Retrieves the metadata record with the given name
@@ -73,6 +85,21 @@ public interface SharedDataStore {
      * @param prefix metadata type identifier
      */
     void deleteAllMetadataRecords(String prefix);
+
+    /**
+     * Retrieved an iterator over all DataRecords.
+     *
+     * @return iterator over DataRecords
+     */
+    Iterator<DataRecord> getAllRecords() throws DataStoreException;
+
+    /**
+     * Retrieves the record for the given identifier
+     *
+     * @param id the if of the record
+     * @return data record
+     */
+    DataRecord getRecordForId(DataIdentifier id) throws DataStoreException;
 
     /**
      * Gets the type.

@@ -28,7 +28,12 @@ import java.util.List;
 import java.util.Random;
 import java.util.Set;
 
+import javax.annotation.Nullable;
+
+import com.google.common.base.Function;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Iterables;
+import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.IOUtils;
@@ -49,6 +54,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Matchers.any;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -159,9 +165,16 @@ public class DataStoreBlobStoreTest extends AbstractBlobStoreTest {
         DataIdentifier d20 = new DataIdentifier("d-20");
         DataIdentifier d30 = new DataIdentifier("d-30");
         List<DataIdentifier> dis = ImmutableList.of(d10, d20, d30);
-
-        DataStore mockedDS = mock(DataStore.class);
-        when(mockedDS.getAllIdentifiers()).thenReturn(dis.iterator());
+        List<DataRecord> recs = Lists.newArrayList(
+            Iterables.transform(dis, new Function<DataIdentifier, DataRecord>() {
+                @Nullable
+                @Override
+                public DataRecord apply(@Nullable DataIdentifier input) {
+                    return new TimeDataRecord(input);
+                }
+        }));
+        OakFileDataStore mockedDS = mock(OakFileDataStore.class);
+        when(mockedDS.getAllRecords()).thenReturn(recs.iterator());
         when(mockedDS.getRecord(new DataIdentifier("d-10"))).thenReturn(new TimeDataRecord(d10));
         when(mockedDS.getRecord(new DataIdentifier("d-20"))).thenReturn(new TimeDataRecord(d20));
         when(mockedDS.getRecord(new DataIdentifier("d-30"))).thenReturn(new TimeDataRecord(d30));
@@ -170,7 +183,6 @@ public class DataStoreBlobStoreTest extends AbstractBlobStoreTest {
         Iterator<String> chunks = ds.getAllChunkIds(25);
         Set<String> expected = Sets.newHashSet("d-10","d-20");
         assertEquals(expected, Sets.newHashSet(chunks));
-
     }
 
     @Test
@@ -188,6 +200,24 @@ public class DataStoreBlobStoreTest extends AbstractBlobStoreTest {
 
         assertTrue(BlobId.isEncoded("abc"+BlobId.SEP+"123"));
         assertFalse(BlobId.isEncoded("abc"));
+    }
+
+    @Test
+    public void testAddOnTrackError() throws Exception {
+        int maxInlineSize = 300;
+        byte[] data = new byte[maxInlineSize];
+        new Random().nextBytes(data);
+
+        DataStore mockedDS = mock(DataStore.class);
+        when(mockedDS.getMinRecordLength()).thenReturn(maxInlineSize);
+        DataStoreBlobStore ds = new DataStoreBlobStore(mockedDS);
+
+        BlobIdTracker mockedTracker = mock(BlobIdTracker.class);
+        doThrow(new IOException("Mocking tracking error")).when(mockedTracker).add(any(String.class));
+        ds.addTracker(mockedTracker);
+
+        String id = ds.writeBlob(new ByteArrayInputStream(data));
+        assertTrue(IOUtils.contentEquals(new ByteArrayInputStream(data), ds.getInputStream(id)));
     }
 
     @Override

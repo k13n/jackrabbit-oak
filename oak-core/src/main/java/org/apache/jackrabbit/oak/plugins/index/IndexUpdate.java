@@ -54,6 +54,7 @@ import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.api.PropertyState;
 import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.commons.PathUtils;
+import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
 import org.apache.jackrabbit.oak.spi.commit.Editor;
 import org.apache.jackrabbit.oak.spi.commit.ProgressNotificationEditor;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
@@ -61,8 +62,6 @@ import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.apache.jackrabbit.oak.spi.state.NodeStateUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import com.google.common.base.Objects;
 
 public class IndexUpdate implements Editor {
 
@@ -125,10 +124,17 @@ public class IndexUpdate implements Editor {
             IndexEditorProvider provider, String async,
             NodeState root, NodeBuilder builder,
             IndexUpdateCallback updateCallback) {
+        this(provider, async, root, builder, updateCallback, CommitInfo.EMPTY);
+    }
+
+    public IndexUpdate(
+            IndexEditorProvider provider, String async,
+            NodeState root, NodeBuilder builder,
+            IndexUpdateCallback updateCallback, CommitInfo commitInfo) {
         this.parent = null;
         this.name = null;
         this.path = "/";
-        this.rootState = new IndexUpdateRootState(provider, async, root, updateCallback);
+        this.rootState = new IndexUpdateRootState(provider, async, root, updateCallback, commitInfo);
         this.builder = checkNotNull(builder);
     }
 
@@ -190,7 +196,7 @@ public class IndexUpdate implements Editor {
             NodeState before) throws CommitFailedException {
         for (String name : definitions.getChildNodeNames()) {
             NodeBuilder definition = definitions.getChildNode(name);
-            if (Objects.equal(rootState.async, definition.getString(ASYNC_PROPERTY_NAME))) {
+            if (isIncluded(rootState.async, definition)) {
                 String type = definition.getString(TYPE_PROPERTY_NAME);
                 if (type == null) {
                     // probably not an index def
@@ -226,6 +232,21 @@ public class IndexUpdate implements Editor {
                     editors.add(editor);
                 }
             }
+        }
+    }
+
+    static boolean isIncluded(String asyncRef, NodeBuilder definition) {
+        if (definition.hasProperty(ASYNC_PROPERTY_NAME)) {
+            PropertyState p = definition.getProperty(ASYNC_PROPERTY_NAME);
+            List<String> opt = newArrayList(p.getValue(Type.STRINGS));
+            if (asyncRef == null) {
+                // sync index job, accept synonyms
+                return opt.contains("") || opt.contains("sync");
+            } else {
+                return opt.contains(asyncRef);
+            }
+        } else {
+            return asyncRef == null;
         }
     }
 
@@ -408,6 +429,7 @@ public class IndexUpdate implements Editor {
         final IndexEditorProvider provider;
         final String async;
         final NodeState root;
+        final CommitInfo commitInfo;
         /**
          * Callback for the update events of the indexing job
          */
@@ -416,16 +438,17 @@ public class IndexUpdate implements Editor {
         final Map<String, CountingCallback> callbacks = Maps.newHashMap();
 
         private IndexUpdateRootState(IndexEditorProvider provider, String async, NodeState root,
-                                     IndexUpdateCallback updateCallback) {
+                                     IndexUpdateCallback updateCallback, CommitInfo commitInfo) {
             this.provider = checkNotNull(provider);
             this.async = async;
             this.root = checkNotNull(root);
             this.updateCallback = checkNotNull(updateCallback);
+            this.commitInfo = commitInfo;
         }
 
         public IndexUpdateCallback newCallback(String indexPath, boolean reindex) {
             CountingCallback cb = new CountingCallback(indexPath, reindex);
-            callbacks.put(cb.indexName, cb);
+            callbacks.put(cb.indexPath, cb);
             return cb;
         }
 
@@ -467,14 +490,14 @@ public class IndexUpdate implements Editor {
             return !reindexedIndexes.isEmpty();
         }
 
-        private class CountingCallback implements IndexUpdateCallback {
-            final String indexName;
+        private class CountingCallback implements ContextAwareCallback, IndexingContext {
+            final String indexPath;
             final boolean reindex;
             final Stopwatch watch = Stopwatch.createStarted();
             int count;
 
-            private CountingCallback(String indexName, boolean reindex) {
-                this.indexName = indexName;
+            public CountingCallback(String indexPath, boolean reindex) {
+                this.indexPath = indexPath;
                 this.reindex = reindex;
             }
 
@@ -482,7 +505,7 @@ public class IndexUpdate implements Editor {
             public void indexUpdate() throws CommitFailedException {
                 count++;
                 if (count % 10000 == 0){
-                    log.info("{} => Indexed {} nodes in {} ...", indexName, count, watch);
+                    log.info("{} => Indexed {} nodes in {} ...", indexPath, count, watch);
                     watch.reset().start();
                 }
                 updateCallback.indexUpdate();
@@ -491,7 +514,36 @@ public class IndexUpdate implements Editor {
             @Override
             public String toString() {
                 String reindexMarker = reindex ? "*" : "";
-                return indexName + reindexMarker + "(" + count + ")";
+                return indexPath + reindexMarker + "(" + count + ")";
+            }
+
+            //~------------------------------< ContextAwareCallback >
+
+            @Override
+            public IndexingContext getIndexingContext() {
+                return this;
+            }
+
+            //~--------------------------------< IndexingContext >
+
+            @Override
+            public String getIndexPath() {
+                return indexPath;
+            }
+
+            @Override
+            public CommitInfo getCommitInfo() {
+                return commitInfo;
+            }
+
+            @Override
+            public boolean isReindexing() {
+                return reindex;
+            }
+
+            @Override
+            public boolean isAsync() {
+                return async != null;
             }
         }
     }

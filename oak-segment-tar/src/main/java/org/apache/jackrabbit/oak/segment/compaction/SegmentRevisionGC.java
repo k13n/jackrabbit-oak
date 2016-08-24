@@ -33,7 +33,6 @@ public interface SegmentRevisionGC {
     /**
      * Set revision gc to paused.
      * @param paused
-     * @return this instance
      */
     void setPausedCompaction(boolean paused);
 
@@ -119,5 +118,9 @@ public interface SegmentRevisionGC {
      * @throws IllegalArgumentException if {@code retainGenerations < 2}
      */
     void setRetainedGenerations(int retainedGenerations);
+
+    long getGcSizeDeltaEstimation();
+
+    void setGcSizeDeltaEstimation(long gcSizeDeltaEstimation);
 
 }

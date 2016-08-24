@@ -43,6 +43,7 @@ import javax.annotation.Nullable;
 
 import com.google.common.base.Stopwatch;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.Lists;
 import com.google.common.util.concurrent.UncheckedExecutionException;
@@ -61,6 +62,8 @@ import org.apache.jackrabbit.oak.plugins.document.DocumentStoreStatsCollector;
 import org.apache.jackrabbit.oak.plugins.document.JournalEntry;
 import org.apache.jackrabbit.oak.plugins.document.NodeDocument;
 import org.apache.jackrabbit.oak.plugins.document.Revision;
+import org.apache.jackrabbit.oak.plugins.document.RevisionListener;
+import org.apache.jackrabbit.oak.plugins.document.RevisionVector;
 import org.apache.jackrabbit.oak.plugins.document.StableRevisionComparator;
 import org.apache.jackrabbit.oak.plugins.document.UpdateOp;
 import org.apache.jackrabbit.oak.plugins.document.UpdateOp.Condition;
@@ -69,7 +72,10 @@ import org.apache.jackrabbit.oak.plugins.document.UpdateOp.Operation;
 import org.apache.jackrabbit.oak.plugins.document.UpdateUtils;
 import org.apache.jackrabbit.oak.plugins.document.cache.CacheChangesTracker;
 import org.apache.jackrabbit.oak.plugins.document.cache.CacheInvalidationStats;
+import org.apache.jackrabbit.oak.plugins.document.cache.ModificationStamp;
 import org.apache.jackrabbit.oak.plugins.document.cache.NodeDocumentCache;
+import org.apache.jackrabbit.oak.plugins.document.mongo.replica.LocalChanges;
+import org.apache.jackrabbit.oak.plugins.document.mongo.replica.ReplicaSetInfo;
 import org.apache.jackrabbit.oak.plugins.document.locks.NodeDocumentLocks;
 import org.apache.jackrabbit.oak.plugins.document.locks.StripedNodeDocumentLocks;
 import org.apache.jackrabbit.oak.plugins.document.util.Utils;
@@ -86,6 +92,7 @@ import com.mongodb.BulkWriteException;
 import com.mongodb.BulkWriteOperation;
 import com.mongodb.BulkWriteResult;
 import com.mongodb.BulkWriteUpsert;
+import com.mongodb.CommandResult;
 import com.mongodb.DB;
 import com.mongodb.DBCollection;
 import com.mongodb.DBCursor;
@@ -109,7 +116,7 @@ import static org.apache.jackrabbit.oak.plugins.document.mongo.MongoUtils.hasInd
 /**
  * A document store that uses MongoDB as the backend.
  */
-public class MongoDocumentStore implements DocumentStore {
+public class MongoDocumentStore implements DocumentStore, RevisionListener {
 
     private static final Logger LOG = LoggerFactory.getLogger(MongoDocumentStore.class);
     private static final PerfLogger PERFLOG = new PerfLogger(
@@ -127,6 +134,11 @@ public class MongoDocumentStore implements DocumentStore {
 
     public static final int IN_CLAUSE_BATCH_SIZE = 500;
 
+    private static final ImmutableSet<String> SERVER_DETAIL_FIELD_NAMES
+            = ImmutableSet.<String>builder()
+            .add("host", "process", "connections", "repl", "storageEngine", "mem")
+            .build();
+
     private final DBCollection nodes;
     private final DBCollection clusterNodes;
     private final DBCollection settings;
@@ -139,6 +151,12 @@ public class MongoDocumentStore implements DocumentStore {
     private final NodeDocumentLocks nodeLocks;
 
     private Clock clock = Clock.SIMPLE;
+
+    private ReplicaSetInfo replicaInfo;
+
+    private RevisionVector mostRecentAccessedRevisions;
+
+    final LocalChanges localChanges;
 
     private final long maxReplicationLagMillis;
 
@@ -171,6 +189,24 @@ public class MongoDocumentStore implements DocumentStore {
             Long.getLong("oak.mongo.maxQueryTimeMS", TimeUnit.MINUTES.toMillis(1));
 
     /**
+     * How often in milliseconds the MongoDocumentStore should estimate the
+     * replication lag.
+     * <p>
+     * Default is 60'000 (one minute).
+     */
+    private long estimationPullFrequencyMS =
+            Long.getLong("oak.mongo.estimationPullFrequencyMS", TimeUnit.SECONDS.toMillis(5));
+
+    /**
+     * Fallback to the old secondary-routing strategy. Setting this to true
+     * disables the optimisation introduced in the OAK-3865.
+     * <p>
+     * Default is false.
+     */
+    private boolean fallbackSecondaryStrategy =
+            Boolean.getBoolean("oak.mongo.fallbackSecondaryStrategy");
+
+    /**
      * The number of documents to put into one bulk update.
      * <p>
      * Default is 30.
@@ -196,7 +232,8 @@ public class MongoDocumentStore implements DocumentStore {
     private boolean hasModifiedIdCompoundIndex = true;
 
     public MongoDocumentStore(DB db, DocumentMK.Builder builder) {
-        String version = checkVersion(db);
+        CommandResult serverStatus = db.command("serverStatus");
+        String version = checkVersion(serverStatus);
         metadata = ImmutableMap.<String,String>builder()
                 .put("type", "mongo")
                 .put("version", version)
@@ -210,6 +247,18 @@ public class MongoDocumentStore implements DocumentStore {
         journal = db.getCollection(Collection.JOURNAL.toString());
 
         maxReplicationLagMillis = builder.getMaxReplicationLagMillis();
+
+        if (fallbackSecondaryStrategy) {
+            replicaInfo = null;
+            localChanges = null;
+        } else {
+            replicaInfo = new ReplicaSetInfo(clock, db, builder.getMongoUri(), estimationPullFrequencyMS, maxReplicationLagMillis, builder.getExecutor());
+            Thread replicaInfoThread = new Thread(replicaInfo, "MongoDocumentStore replica set info provider (" + builder.getClusterId() + ")");
+            replicaInfoThread.setDaemon(true);
+            replicaInfoThread.start();
+            localChanges = new LocalChanges(builder.getClusterId());
+            replicaInfo.addListener(localChanges);
+        }
 
         // indexes:
         // the _id field is the primary key, so we don't need to define it
@@ -242,14 +291,17 @@ public class MongoDocumentStore implements DocumentStore {
         this.nodeLocks = new StripedNodeDocumentLocks();
         this.nodesCache = builder.buildNodeDocumentCache(this, nodeLocks);
 
-        LOG.info("Configuration maxReplicationLagMillis {}, " +
-                "maxDeltaForModTimeIdxSecs {}, disableIndexHint {}, {}",
-                maxReplicationLagMillis, maxDeltaForModTimeIdxSecs,
-                disableIndexHint, db.getWriteConcern());
+        LOG.info("Connected to MongoDB {} with maxReplicationLagMillis {}, " +
+                "maxDeltaForModTimeIdxSecs {}, disableIndexHint {}, " +
+                "{}, serverStatus {}",
+                version, maxReplicationLagMillis, maxDeltaForModTimeIdxSecs,
+                disableIndexHint, db.getWriteConcern(),
+                serverDetails(serverStatus));
     }
 
-    private static String checkVersion(DB db) {
-        String version = db.command("buildInfo").getString("version");
+    @Nonnull
+    private static String checkVersion(CommandResult serverStatus) {
+        String version = serverStatus.getString("version");
         Matcher m = Pattern.compile("^(\\d+)\\.(\\d+)\\..*").matcher(version);
         if (!m.matches()) {
             throw new IllegalArgumentException("Malformed MongoDB version: " + version);
@@ -266,6 +318,18 @@ public class MongoDocumentStore implements DocumentStore {
         }
 
         return version;
+    }
+
+    @Nonnull
+    private static String serverDetails(CommandResult serverStatus) {
+        Map<String, Object> details = Maps.newHashMap();
+        for (String key : SERVER_DETAIL_FIELD_NAMES) {
+            Object value = serverStatus.get(key);
+            if (value != null) {
+                details.put(key, value);
+            }
+        }
+        return details.toString();
     }
 
     @Override
@@ -309,11 +373,11 @@ public class MongoDocumentStore implements DocumentStore {
                         ids.size(), size);
             }
 
-            Map<String, Long> modCounts = getModCounts(ids);
+            Map<String, ModificationStamp> modStamps = getModStamps(ids);
             result.queryCount++;
 
-            int invalidated = nodesCache.invalidateOutdated(modCounts);
-            for (String id : filter(ids, not(in(modCounts.keySet())))) {
+            int invalidated = nodesCache.invalidateOutdated(modStamps);
+            for (String id : filter(ids, not(in(modStamps.keySet())))) {
                 nodesCache.invalidate(id);
                 invalidated++;
             }
@@ -471,7 +535,7 @@ public class MongoDocumentStore implements DocumentStore {
         boolean isSlaveOk = false;
         boolean docFound = true;
         try {
-            ReadPreference readPreference = getMongoReadPreference(collection, Utils.getParentId(key), docReadPref);
+            ReadPreference readPreference = getMongoReadPreference(collection, null, key, docReadPref);
 
             if(readPreference.isSlaveOk()){
                 LOG.trace("Routing call to secondary for fetching [{}]", key);
@@ -480,17 +544,6 @@ public class MongoDocumentStore implements DocumentStore {
 
             DBObject obj = dbCollection.findOne(getByKeyQuery(key).get(), null, null, readPreference);
 
-            if (obj == null
-                    && readPreference.isSlaveOk()) {
-                //In case secondary read preference is used and node is not found
-                //then check with primary again as it might happen that node document has not been
-                //replicated. This is required for case like SplitDocument where the SplitDoc is fetched with
-                //maxCacheAge == Integer.MAX_VALUE which results in readPreference of secondary.
-                //In such a case we know that document with such an id must exist
-                //but possibly dut to replication lag it has not reached to secondary. So in that case read again
-                //from primary
-                obj = dbCollection.findOne(getByKeyQuery(key).get(), null, null, ReadPreference.primary());
-            }
             if(obj == null){
                 docFound = false;
                 return null;
@@ -583,7 +636,7 @@ public class MongoDocumentStore implements DocumentStore {
                 cursor.maxTime(maxQueryTime, TimeUnit.MILLISECONDS);
             }
             ReadPreference readPreference =
-                    getMongoReadPreference(collection, parentId, getDefaultReadPreference(collection));
+                    getMongoReadPreference(collection, parentId, null, getDefaultReadPreference(collection));
 
             if(readPreference.isSlaveOk()){
                 isSlaveOk = true;
@@ -770,6 +823,7 @@ public class MongoDocumentStore implements DocumentStore {
                 if (collection == Collection.NODES) {
                     NodeDocument newDoc = (NodeDocument) applyChanges(collection, oldDoc, updateOp);
                     nodesCache.put(newDoc);
+                    updateLocalChanges(newDoc);
                 }
                 oldDoc.seal();
             } else if (upsert) {
@@ -777,6 +831,7 @@ public class MongoDocumentStore implements DocumentStore {
                     NodeDocument doc = (NodeDocument) collection.newDocument(this);
                     UpdateUtils.applyChanges(doc, updateOp);
                     nodesCache.putIfAbsent(doc);
+                    updateLocalChanges(doc);
                 }
             } else {
                 // updateOp without conditions and not an upsert
@@ -902,7 +957,7 @@ public class MongoDocumentStore implements DocumentStore {
         Map<String, NodeDocument> nodes = new HashMap<String, NodeDocument>();
         for (String key : keys) {
             NodeDocument cached = nodesCache.getIfPresent(key);
-            if (cached != null && cached != NodeDocument.NULL) {
+            if (cached != null) {
                 nodes.put(key, cached);
             }
         }
@@ -934,11 +989,16 @@ public class MongoDocumentStore implements DocumentStore {
 
                 for (String key : difference(bulkOperations.keySet(), bulkResult.failedUpdates)) {
                     T oldDoc = oldDocs.get(key);
-                    if (oldDoc != null) {
+                    if (oldDoc != null && oldDoc != NodeDocument.NULL) {
                         NodeDocument newDoc = (NodeDocument) applyChanges(collection, oldDoc, bulkOperations.get(key));
                         docsToCache.add(newDoc);
                     }
                 }
+
+                for (NodeDocument doc : docsToCache) {
+                    updateLocalChanges(doc);
+                }
+
                 nodesCache.putNonConflictingDocs(tracker, docsToCache);
             }
             oldDocs.keySet().removeAll(bulkResult.failedUpdates);
@@ -1001,7 +1061,7 @@ public class MongoDocumentStore implements DocumentStore {
             QueryBuilder query = createQueryForUpdate(id, updateOp.getConditions());
             T oldDoc = oldDocs.get(id);
             DBObject update;
-            if (oldDoc == null) {
+            if (oldDoc == null || oldDoc == NodeDocument.NULL) {
                 query.and(Document.MOD_COUNT).exists(false);
                 update = createUpdate(updateOp, true);
             } else {
@@ -1104,6 +1164,7 @@ public class MongoDocumentStore implements DocumentStore {
                 if (collection == Collection.NODES) {
                     for (T doc : docs) {
                         nodesCache.putIfAbsent((NodeDocument) doc);
+                        updateLocalChanges((NodeDocument) doc);
                     }
                 }
                 insertSuccess = true;
@@ -1139,17 +1200,17 @@ public class MongoDocumentStore implements DocumentStore {
             try {
                 dbCollection.update(query.get(), update, false, true);
                 if (collection == Collection.NODES) {
-                    Map<String, Long> modCounts = getModCounts(filterValues(cachedDocs, notNull()).keySet());
+                    Map<String, ModificationStamp> modCounts = getModStamps(filterValues(cachedDocs, notNull()).keySet());
                     // update cache
                     for (Entry<String, NodeDocument> entry : cachedDocs.entrySet()) {
                         // the cachedDocs is not empty, so the collection = NODES
                         Lock lock = nodeLocks.acquire(entry.getKey());
                         try {
-                            Long postUpdateModCount = modCounts.get(entry.getKey());
-                            if (postUpdateModCount != null
+                            ModificationStamp postUpdateModStamp = modCounts.get(entry.getKey());
+                            if (postUpdateModStamp != null
                                     && entry.getValue() != null
                                     && entry.getValue() != NodeDocument.NULL
-                                    && Long.valueOf(postUpdateModCount - 1).equals(entry.getValue().getModCount())) {
+                                    && Long.valueOf(postUpdateModStamp.modCount - 1).equals(entry.getValue().getModCount())) {
                                 // post update modCount is one higher than
                                 // what we currently see in the cache. we can
                                 // replace the cached document
@@ -1179,36 +1240,47 @@ public class MongoDocumentStore implements DocumentStore {
     }
 
     /**
-     * Returns the {@link Document#MOD_COUNT} value of the documents with the
+     * Returns the {@link Document#MOD_COUNT} and
+     * {@link NodeDocument#MODIFIED_IN_SECS} values of the documents with the
      * given {@code keys}. The returned map will only contain entries for
-     * existing documents.
+     * existing documents. The default value is -1 if the document does not have
+     * a modCount field. The same applies to the modified field.
      *
      * @param keys the keys of the documents.
-     * @return map with key to {@link Document#MOD_COUNT} value mapping.
+     * @return map with key to modification stamp mapping.
      * @throws MongoException if the call fails
      */
     @Nonnull
-    private Map<String, Long> getModCounts(Iterable<String> keys)
+    private Map<String, ModificationStamp> getModStamps(Iterable<String> keys)
             throws MongoException {
         QueryBuilder query = QueryBuilder.start(Document.ID).in(keys);
         // Fetch only the modCount and id
         final BasicDBObject fields = new BasicDBObject(Document.ID, 1);
         fields.put(Document.MOD_COUNT, 1);
+        fields.put(NodeDocument.MODIFIED_IN_SECS, 1);
 
         DBCursor cursor = nodes.find(query.get(), fields);
         cursor.setReadPreference(ReadPreference.primary());
 
-        Map<String, Long> modCounts = Maps.newHashMap();
+        Map<String, ModificationStamp> modCounts = Maps.newHashMap();
         for (DBObject obj : cursor) {
             String id = (String) obj.get(Document.ID);
             Long modCount = Utils.asLong((Number) obj.get(Document.MOD_COUNT));
-            modCounts.put(id, modCount);
+            if (modCount == null) {
+                modCount = -1L;
+            }
+            Long modified = Utils.asLong((Number) obj.get(NodeDocument.MODIFIED_IN_SECS));
+            if (modified == null) {
+                modified = -1L;
+            }
+            modCounts.put(id, new ModificationStamp(modCount, modified));
         }
         return modCounts;
     }
 
     DocumentReadPreference getReadPreference(int maxCacheAge){
-        if(maxCacheAge >= 0 && maxCacheAge < maxReplicationLagMillis) {
+        long lag = fallbackSecondaryStrategy ? maxReplicationLagMillis : replicaInfo.getLag();
+        if(maxCacheAge >= 0 && maxCacheAge < lag) {
             return DocumentReadPreference.PRIMARY;
         } else if(maxCacheAge == Integer.MAX_VALUE){
             return DocumentReadPreference.PREFER_SECONDARY;
@@ -1221,9 +1293,10 @@ public class MongoDocumentStore implements DocumentStore {
         return col == Collection.NODES ? DocumentReadPreference.PREFER_SECONDARY_IF_OLD_ENOUGH : DocumentReadPreference.PRIMARY;
     }
 
-    <T extends Document> ReadPreference getMongoReadPreference(Collection<T> collection,
-                                                               String parentId,
-                                                               DocumentReadPreference preference) {
+    <T extends Document> ReadPreference getMongoReadPreference(@Nonnull Collection<T> collection,
+                                                               @Nullable String parentId,
+                                                               @Nullable String documentId,
+                                                               @Nonnull DocumentReadPreference preference) {
         switch(preference){
             case PRIMARY:
                 return ReadPreference.primary();
@@ -1236,23 +1309,37 @@ public class MongoDocumentStore implements DocumentStore {
                     return ReadPreference.primary();
                 }
 
-                // read from primary unless parent has not been modified
-                // within replication lag period
-                ReadPreference readPreference = ReadPreference.primary();
-                if (parentId != null) {
-                    long replicationSafeLimit = getTime() - maxReplicationLagMillis;
-                    NodeDocument cachedDoc = nodesCache.getIfPresent(parentId);
-                    // FIXME: this is not quite accurate, because ancestors
+                boolean secondarySafe;
+                if (fallbackSecondaryStrategy) {
+                   // This is not quite accurate, because ancestors
                     // are updated in a background thread (_lastRev). We
                     // will need to revise this for low maxReplicationLagMillis
                     // values
-                    if (cachedDoc != null && !cachedDoc.hasBeenModifiedSince(replicationSafeLimit)) {
+                    long replicationSafeLimit = getTime() - maxReplicationLagMillis;
 
+                    if (parentId == null) {
+                        secondarySafe = false;
+                    } else {
                         //If parent has been modified loooong time back then there children
                         //would also have not be modified. In that case we can read from secondary
-                        readPreference = getConfiguredReadPreference(collection);
+                        NodeDocument cachedDoc = nodesCache.getIfPresent(parentId);
+                        secondarySafe = cachedDoc != null && !cachedDoc.hasBeenModifiedSince(replicationSafeLimit);
                     }
+                } else {
+                    secondarySafe = true;
+                    secondarySafe &= collection == Collection.NODES;
+                    secondarySafe &= documentId == null || !localChanges.mayContain(documentId);
+                    secondarySafe &= parentId == null || !localChanges.mayContainChildrenOf(parentId);
+                    secondarySafe &= mostRecentAccessedRevisions == null || replicaInfo.isMoreRecentThan(mostRecentAccessedRevisions);
                 }
+
+                ReadPreference readPreference;
+                if (secondarySafe) {
+                    readPreference = getConfiguredReadPreference(collection);
+                } else {
+                    readPreference = ReadPreference.primary();
+                }
+
                 return readPreference;
             default:
                 throw new IllegalArgumentException("Unsupported usage " + preference);
@@ -1327,6 +1414,9 @@ public class MongoDocumentStore implements DocumentStore {
 
     @Override
     public void dispose() {
+        if (replicaInfo != null) {
+            replicaInfo.stop();
+        }
         nodes.getDB().getMongo().close();
         try {
             nodesCache.close();
@@ -1522,6 +1612,14 @@ public class MongoDocumentStore implements DocumentStore {
         this.stats = stats;
     }
 
+    void setReplicaInfo(ReplicaSetInfo replicaInfo) {
+        if (this.replicaInfo != null) {
+            this.replicaInfo.stop();
+        }
+        this.replicaInfo = replicaInfo;
+        this.replicaInfo.addListener(localChanges);
+    }
+
     @Override
     public long determineServerTimeDifferenceMillis() {
         // the assumption is that the network delay from this instance
@@ -1538,14 +1636,22 @@ public class MongoDocumentStore implements DocumentStore {
         final long start = System.currentTimeMillis();
         // assumption here: server returns UTC - ie the returned
         // date object is correctly taking care of time zones.
-        final Date serverLocalTime = db.command("serverStatus").getDate("localTime");
+        final CommandResult serverStatus = db.command("serverStatus");
+        if (serverStatus == null) {
+            // OAK-4107 / OAK-4515 : extra safety
+            LOG.warn("determineServerTimeDifferenceMillis: db.serverStatus returned null - cannot determine time difference - assuming 0ms.");
+            return 0;
+        }
+        final Date serverLocalTime = serverStatus.getDate("localTime");
         if (serverLocalTime == null) {
-        	// OAK-4107 : looks like this can happen - at least
-        	// has been seen once on mongo 3.0.9
-        	// let's handle this gently and issue a log.warn
-        	// instead of throwing a NPE
-        	LOG.warn("determineServerTimeDifferenceMillis: db.serverStatus.localTime returned null - cannot determine time difference - assuming 0ms");
-        	return 0;
+            // OAK-4107 / OAK-4515 : looks like this can happen - at least
+            // has been seen once on mongo 3.0.9
+            // let's handle this gently and issue a log.warn
+            // instead of throwing a NPE
+            LOG.warn("determineServerTimeDifferenceMillis: db.serverStatus.localTime returned null - cannot determine time difference - assuming 0ms. "
+                    + "(Result details: server exception=" + serverStatus.getException() + ", server error message=" + serverStatus.getErrorMessage() + ")", 
+                    serverStatus.getException());
+            return 0;
         }
         final long end = System.currentTimeMillis();
 
@@ -1558,6 +1664,25 @@ public class MongoDocumentStore implements DocumentStore {
         final long diff = midPoint - serverLocalTimeMillis;
 
         return diff;
+    }
+
+    @Override
+    public synchronized void updateAccessedRevision(RevisionVector revisions) {
+        RevisionVector previousValue = mostRecentAccessedRevisions;
+        if (mostRecentAccessedRevisions == null) {
+            mostRecentAccessedRevisions = revisions;
+        } else {
+            mostRecentAccessedRevisions = mostRecentAccessedRevisions.pmax(revisions);
+        }
+        if (LOG.isDebugEnabled() && !mostRecentAccessedRevisions.equals(previousValue)) {
+            LOG.debug("Most recent accessed revisions: {}", mostRecentAccessedRevisions);
+        }
+    }
+
+    private void updateLocalChanges(NodeDocument doc) {
+        if (localChanges != null) {
+            localChanges.add(doc.getId(), Revision.getCurrentTimestamp());
+        }
     }
 
     private static class BulkUpdateResult {

@@ -18,6 +18,7 @@
  */
 package org.apache.jackrabbit.oak.upgrade;
 
+import static org.apache.jackrabbit.oak.segment.file.FileStoreBuilder.fileStoreBuilder;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -55,14 +56,13 @@ public class UpgradeOldSegmentTest {
         File oldRepo = new File(testFolder, "test-repo-1.0");
         File newRepo = new File(testFolder, "test-repo-new");
         oldRepo.mkdirs();
-        newRepo.mkdirs();
         try (InputStream in = UpgradeOldSegmentTest.class.getResourceAsStream("/test-repo-1.0.zip")) {
             Util.unzip(in, oldRepo);
         }
 
         OakUpgrade.main("segment-old:" + oldRepo.getPath(), newRepo.getPath());
 
-        FileStore store = FileStore.builder(new File(newRepo, "segmentstore")).build();
+        FileStore store = fileStoreBuilder(new File(newRepo, "segmentstore")).build();
         Repository repo = new Jcr(SegmentNodeStoreBuilders.builder(store).build()).createRepository();
         Session s = repo.login(new SimpleCredentials("admin", "admin".toCharArray()));
 

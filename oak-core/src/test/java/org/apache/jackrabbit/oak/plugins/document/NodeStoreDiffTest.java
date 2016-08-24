@@ -20,10 +20,12 @@
 package org.apache.jackrabbit.oak.plugins.document;
 
 import java.io.IOException;
+import java.util.List;
 import java.util.Set;
 
 import javax.annotation.Nonnull;
 
+import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.commons.PathUtils;
@@ -135,10 +137,17 @@ public class NodeStoreDiffTest {
                 //but less then lastRev of the of readRevision. Where readRevision is the rev of root node when
                 //rebase was performed
 
+                // remember paths accessed so far
+                List<String> paths = Lists.newArrayList(tds.paths);
+
                 //This is not to be done in actual cases as CommitHooks are invoked in critical sections
                 //and creating nodes from within CommitHooks would cause deadlock. This is done here to ensure
                 //that changes are done when rebase has been performed and merge is about to happen
                 createNodes("/oak:index/prop-b/b1");
+
+                // reset accessed paths
+                tds.reset();
+                tds.paths.addAll(paths);
 
                 //For now we the cache is disabled (size 0) so this is not required
                 //ns.nodeCache.invalidateAll();
@@ -217,7 +226,7 @@ public class NodeStoreDiffTest {
     private void prRev(NodeState ns){
         if(ns instanceof DocumentNodeState){
             DocumentNodeState dns = ((DocumentNodeState) ns);
-            LOG.info("Root at {} ({})", dns.getRevision(), dns.getLastRevision());
+            LOG.info("Root at {} ({})", dns.getRootRevision(), dns.getLastRevision());
         }
     }
 

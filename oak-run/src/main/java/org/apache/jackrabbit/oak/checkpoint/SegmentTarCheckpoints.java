@@ -17,6 +17,8 @@
 
 package org.apache.jackrabbit.oak.checkpoint;
 
+import static org.apache.jackrabbit.oak.segment.file.FileStoreBuilder.fileStoreBuilder;
+
 import java.io.File;
 import java.io.IOException;
 import java.util.List;
@@ -32,7 +34,7 @@ import org.apache.jackrabbit.oak.spi.state.NodeState;
 class SegmentTarCheckpoints extends Checkpoints {
 
     static Checkpoints create(File path, Closer closer) throws IOException {
-        return new SegmentTarCheckpoints(closer.register(FileStore.builder(path).build()));
+        return new SegmentTarCheckpoints(closer.register(fileStoreBuilder(path).build()));
     }
 
     private final FileStore store;
@@ -44,7 +46,7 @@ class SegmentTarCheckpoints extends Checkpoints {
     @Override
     public List<CP> list() {
         List<CP> list = Lists.newArrayList();
-        NodeState ns = store.getReader().readHeadState().getChildNode("checkpoints");
+        NodeState ns = store.getHead().getChildNode("checkpoints");
         for (ChildNodeEntry cne : ns.getChildNodeEntries()) {
             NodeState cneNs = cne.getNodeState();
             list.add(new CP(cne.getName(),
@@ -55,7 +57,7 @@ class SegmentTarCheckpoints extends Checkpoints {
 
     @Override
     public long removeAll() {
-        SegmentNodeState head = store.getReader().readHeadState();
+        SegmentNodeState head = store.getHead();
         NodeBuilder builder = head.builder();
 
         NodeBuilder cps = builder.getChildNode("checkpoints");
@@ -70,7 +72,7 @@ class SegmentTarCheckpoints extends Checkpoints {
 
     @Override
     public long removeUnreferenced() {
-        SegmentNodeState head = store.getReader().readHeadState();
+        SegmentNodeState head = store.getHead();
 
         String ref = getReferenceCheckpoint(head.getChildNode("root"));
 
@@ -94,7 +96,7 @@ class SegmentTarCheckpoints extends Checkpoints {
 
     @Override
     public int remove(String cp) {
-        SegmentNodeState head = store.getReader().readHeadState();
+        SegmentNodeState head = store.getHead();
         NodeBuilder builder = head.builder();
 
         NodeBuilder cpn = builder.getChildNode("checkpoints")

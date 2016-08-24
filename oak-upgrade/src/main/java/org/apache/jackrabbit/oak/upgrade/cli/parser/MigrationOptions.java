@@ -46,11 +46,17 @@ public class MigrationOptions {
 
     private final String[] mergePaths;
 
+    private final boolean includeIndex;
+
     private final boolean failOnError;
 
     private final boolean earlyShutdown;
 
     private final boolean skipInitialization;
+
+    private final boolean skipNameCheck;
+
+    private final boolean ignoreMissingBinaries;
 
     public MigrationOptions(MigrationCliArguments args) {
         this.copyBinariesByReference = !args.hasOption(OptionParserFactory.COPY_BINARIES);
@@ -76,9 +82,12 @@ public class MigrationOptions {
         this.includePaths = split(args.getOption(OptionParserFactory.INCLUDE_PATHS));
         this.excludePaths = split(args.getOption(OptionParserFactory.EXCLUDE_PATHS));
         this.mergePaths = split(args.getOption(OptionParserFactory.MERGE_PATHS));
+        this.includeIndex = args.hasOption(OptionParserFactory.INCLUDE_INDEX);
         this.failOnError = args.hasOption(OptionParserFactory.FAIL_ON_ERROR);
         this.earlyShutdown = args.hasOption(OptionParserFactory.EARLY_SHUTDOWN);
         this.skipInitialization = args.hasOption(OptionParserFactory.SKIP_INIT);
+        this.skipNameCheck = args.hasOption(OptionParserFactory.SKIP_NAME_CHECK);
+        this.ignoreMissingBinaries = args.hasOption(OptionParserFactory.IGNORE_MISSING_BINARIES);
         logOptions();
     }
 
@@ -126,6 +135,18 @@ public class MigrationOptions {
         return skipInitialization;
     }
 
+    public boolean isSkipNameCheck() {
+        return skipNameCheck;
+    }
+
+    public boolean isIncludeIndex() {
+        return includeIndex;
+    }
+
+    public boolean isIgnoreMissingBinaries() {
+        return ignoreMissingBinaries;
+    }
+
     private void logOptions() {
         if (copyBinariesByReference) {
             log.info("DataStore needs to be shared with new repository");
@@ -167,6 +188,18 @@ public class MigrationOptions {
 
         if (skipInitialization) {
             log.info("The repository initialization will be skipped");
+        }
+
+        if (skipNameCheck) {
+            log.info("Test for long-named nodes will be disabled");
+        }
+
+        if (includeIndex) {
+            log.info("Index data for the paths {} will be copied", (Object) includePaths);
+        }
+
+        if (ignoreMissingBinaries) {
+            log.info("Missing binaries won't break the migration");
         }
 
         log.info("Cache size: {} MB", cacheSizeInMB);

@@ -74,7 +74,7 @@ public class SegmentOverflowExceptionIT {
     private final Random rnd = new Random();
 
     @Rule
-    public TemporaryFolder folder = new TemporaryFolder();
+    public TemporaryFolder folder = new TemporaryFolder(new File("target"));
 
     private File getFileStoreFolder() {
         return folder.getRoot();
@@ -100,7 +100,7 @@ public class SegmentOverflowExceptionIT {
     };
 
     @Test
-    public void run() throws IOException, CommitFailedException, InterruptedException {
+    public void run() throws Exception {
         FileStore fileStore = FileStore.builder(getFileStoreFolder()).withGCMonitor(gcMonitor).build();
         try {
             final SegmentNodeStore nodeStore = SegmentNodeStore.builder(fileStore).build();

@@ -70,16 +70,24 @@ public final class JournalEntry extends Document {
     private static final int READ_CHUNK_SIZE = 100;
 
     /**
-     * switch to disk after 1MB
+     * switch to disk after 2048 paths
      */
-    private static final int STRING_SORT_OVERFLOW_TO_DISK_THRESHOLD = 1024 * 1024;
+    private static final int STRING_SORT_OVERFLOW_TO_DISK_THRESHOLD
+            = Integer.getInteger("oak.overflowToDiskThreshold", StringSort.BATCH_SIZE);
 
     private final DocumentStore store;
 
     private volatile TreeNode changes = null;
 
+    private boolean concurrent;
+
     JournalEntry(DocumentStore store) {
+        this(store, false);
+    }
+
+    JournalEntry(DocumentStore store, boolean concurrent) {
         this.store = store;
+        this.concurrent = concurrent;
     }
 
     static StringSort newSorter() {
@@ -134,6 +142,9 @@ public final class JournalEntry extends Document {
                 // add parent to the diff entry
                 entry.append(node.getPath(), getChanges(node));
                 deDuplicatedCnt++;
+                // clean up the hierarchy when we are done with this
+                // part of the tree to avoid excessive memory usage
+                node.children = TreeNode.NO_CHILDREN;
                 node = node.parent;
             }
 
@@ -168,7 +179,9 @@ public final class JournalEntry extends Document {
     /**
      * Reads all external changes between the two given revisions (with the same
      * clusterId) from the journal and appends the paths therein to the provided
-     * sorter.
+     * sorter. If there is no exact match of a journal entry for the given
+     * {@code to} revision, this method will fill external changes from the
+     * next higher journal entry that contains the revision.
      *
      * @param sorter the StringSort to which all externally changed paths
      *               between the provided revisions will be added
@@ -184,6 +197,10 @@ public final class JournalEntry extends Document {
             throws IOException {
         checkArgument(checkNotNull(from).getClusterId() == checkNotNull(to).getClusterId());
 
+        if (from.compareRevisionTime(to) >= 0) {
+            return;
+        }
+
         // to is inclusive, but DocumentStore.query() toKey is exclusive
         final String inclusiveToId = asId(to);
         to = new Revision(to.getTimestamp(), to.getCounter() + 1,
@@ -196,6 +213,8 @@ public final class JournalEntry extends Document {
         // limit, then loop and do subsequent queries
         final String toId = asId(to);
         String fromId = asId(from);
+        int numEntries = 0;
+        JournalEntry lastEntry = null;
         while (true) {
             if (fromId.equals(inclusiveToId)) {
                 // avoid query if from and to are off by just 1 counter (which
@@ -205,6 +224,10 @@ public final class JournalEntry extends Document {
                 break;
             }
             List<JournalEntry> partialResult = store.query(JOURNAL, fromId, toId, READ_CHUNK_SIZE);
+            numEntries += partialResult.size();
+            if (!partialResult.isEmpty()) {
+                lastEntry = partialResult.get(partialResult.size() - 1);
+            }
 
             for (JournalEntry d : partialResult) {
                 d.addTo(sorter);
@@ -216,6 +239,16 @@ public final class JournalEntry extends Document {
             // that works fine as the query is non-inclusive (ie does not
             // include the from which we'd otherwise double-process)
             fromId = partialResult.get(partialResult.size() - 1).getId();
+        }
+        // check if last processed journal entry covers toId, otherwise
+        // read next document. also read next journal entry when none
+        // were read so far
+        if (numEntries == 0
+                || (lastEntry != null && !lastEntry.getId().equals(inclusiveToId))) {
+            String maxId = asId(new Revision(Long.MAX_VALUE, 0, to.getClusterId()));
+            for (JournalEntry d : store.query(JOURNAL, inclusiveToId, maxId, 1)) {
+                d.addTo(sorter);
+            }
         }
     }
 
@@ -364,7 +397,7 @@ public final class JournalEntry extends Document {
     @Nonnull
     private TreeNode getChanges() {
         if (changes == null) {
-            TreeNode node = new TreeNode();
+            TreeNode node = new TreeNode(concurrent);
             String c = (String) get(CHANGES);
             if (c != null) {
                 node.parse(new JsopTokenizer(c));
@@ -380,17 +413,23 @@ public final class JournalEntry extends Document {
 
         private Map<String, TreeNode> children = NO_CHILDREN;
 
+        private final MapFactory mapFactory;
         private final TreeNode parent;
         private final String name;
 
         TreeNode() {
-            this(null, "");
+            this(false);
         }
 
-        TreeNode(TreeNode parent, String name) {
+        TreeNode(boolean concurrent) {
+            this(concurrent ? MapFactory.CONCURRENT : MapFactory.DEFAULT, null, "");
+        }
+
+        TreeNode(MapFactory mapFactory, TreeNode parent, String name) {
             checkArgument(!name.contains("/"),
                     "name must not contain '/': {}", name);
 
+            this.mapFactory = mapFactory;
             this.parent = parent;
             this.name = name;
         }
@@ -491,11 +530,11 @@ public final class JournalEntry extends Document {
         @Nonnull
         private TreeNode getOrCreate(String name) {
             if (children == NO_CHILDREN) {
-                children = Maps.newHashMap();
+                children = mapFactory.newMap();
             }
             TreeNode c = children.get(name);
             if (c == null) {
-                c = new TreeNode(this, name);
+                c = new TreeNode(mapFactory, this, name);
                 children.put(name, c);
             }
             return c;
@@ -507,4 +546,22 @@ public final class JournalEntry extends Document {
         void node(TreeNode node, String path) throws IOException;
     }
 
+    private interface MapFactory {
+
+        MapFactory DEFAULT = new MapFactory() {
+            @Override
+            public Map<String, TreeNode> newMap() {
+                return Maps.newHashMap();
+            }
+        };
+
+        MapFactory CONCURRENT = new MapFactory() {
+            @Override
+            public Map<String, TreeNode> newMap() {
+                return Maps.newConcurrentMap();
+            }
+        };
+
+        Map<String, TreeNode> newMap();
+    }
 }

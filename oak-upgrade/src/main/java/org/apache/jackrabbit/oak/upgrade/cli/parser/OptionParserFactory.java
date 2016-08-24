@@ -28,6 +28,8 @@ public class OptionParserFactory {
 
     public static final String FAIL_ON_ERROR = "fail-on-error";
 
+    public static final String IGNORE_MISSING_BINARIES = "ignore-missing-binaries";
+
     public static final String EARLY_SHUTDOWN = "early-shutdown";
 
     public static final String CACHE_SIZE = "cache";
@@ -57,6 +59,8 @@ public class OptionParserFactory {
     public static final String DST_S3 = "s3datastore";
 
     public static final String DST_S3_CONFIG = "s3config";
+    
+    public static final String MISSING_BLOBSTORE = "missingblobstore";
 
     public static final String COPY_VERSIONS = "copy-versions";
 
@@ -69,6 +73,10 @@ public class OptionParserFactory {
     public static final String MERGE_PATHS = "merge-paths";
 
     public static final String SKIP_INIT = "skip-init";
+
+    public static final String SKIP_NAME_CHECK = "skip-name-check";
+
+    public static final String INCLUDE_INDEX = "include-index";
 
     public static OptionParser create() {
         OptionParser op = new OptionParser();
@@ -101,6 +109,8 @@ public class OptionParserFactory {
         op.accepts(DST_S3, "Datastore directory to be used for the target S3").withRequiredArg().ofType(String.class);
         op.accepts(DST_S3_CONFIG, "Configuration file for the target S3DataStore").withRequiredArg()
                 .ofType(String.class);
+        op.accepts(MISSING_BLOBSTORE, "Try to upgrade the NodeStore without access to the external Datastore");
+        op.accepts(IGNORE_MISSING_BINARIES, "Don't break the migration if some binaries are missing");
     }
 
     private static void addRdbOptions(OptionParser op) {
@@ -117,6 +127,7 @@ public class OptionParserFactory {
                 .ofType(String.class);
         op.accepts(MERGE_PATHS, "Comma-separated list of paths to merge during copy.").withRequiredArg()
                 .ofType(String.class);
+        op.accepts(INCLUDE_INDEX, "Copy index data for paths specified in the " + INCLUDE_PATHS + " option");
     }
 
     private static void addVersioningOptions(OptionParser op) {

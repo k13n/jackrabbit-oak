@@ -27,8 +27,10 @@ import static org.apache.jackrabbit.oak.commons.PathUtils.concat;
 import static org.apache.jackrabbit.oak.commons.PathUtils.denotesRoot;
 import static org.apache.jackrabbit.oak.commons.PathUtils.getName;
 import static org.apache.jackrabbit.oak.commons.PathUtils.getParentPath;
+import static org.apache.jackrabbit.oak.segment.file.FileStoreBuilder.fileStoreBuilder;
 import static org.apache.jackrabbit.oak.spi.state.NodeStateUtils.getNode;
 
+import java.io.Closeable;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
@@ -41,6 +43,7 @@ import org.apache.jackrabbit.oak.segment.SegmentBlob;
 import org.apache.jackrabbit.oak.segment.SegmentNodeStoreBuilders;
 import org.apache.jackrabbit.oak.segment.file.FileStore;
 import org.apache.jackrabbit.oak.segment.file.FileStore.ReadOnlyStore;
+import org.apache.jackrabbit.oak.segment.file.InvalidFileStoreVersionException;
 import org.apache.jackrabbit.oak.segment.file.JournalReader;
 import org.apache.jackrabbit.oak.spi.state.ChildNodeEntry;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
@@ -52,7 +55,7 @@ import org.slf4j.LoggerFactory;
  * {@link FileStore} for inconsistency and
  * reporting that latest consistent revision.
  */
-public class ConsistencyChecker {
+public class ConsistencyChecker implements Closeable {
     private static final Logger LOG = LoggerFactory.getLogger(ConsistencyChecker.class);
 
     private final ReadOnlyStore store;
@@ -72,14 +75,15 @@ public class ConsistencyChecker {
      * @throws IOException
      */
     public static String checkConsistency(File directory, String journalFileName,
-            boolean fullTraversal, long debugInterval, long binLen) throws IOException {
+            boolean fullTraversal, long debugInterval, long binLen) throws IOException, InvalidFileStoreVersionException {
         print("Searching for last good revision in {}", journalFileName);
-        JournalReader journal = new JournalReader(new File(directory, journalFileName));
         Set<String> badPaths = newHashSet();
-        ConsistencyChecker checker = new ConsistencyChecker(directory, debugInterval);
-        try {
+        try (
+            JournalReader journal = new JournalReader(new File(directory, journalFileName));
+            ConsistencyChecker checker = new ConsistencyChecker(directory, debugInterval)) {
             int revisionCount = 0;
-            for (String revision : journal) {
+            while (journal.hasNext()) {
+                String revision = journal.next();
                 try {
                     print("Checking revision {}", revision);
                     revisionCount++;
@@ -99,9 +103,6 @@ public class ConsistencyChecker {
                     print("Skipping invalid record id {}", revision);
                 }
             }
-        } finally {
-            checker.close();
-            journal.close();
         }
 
         print("No good revision found");
@@ -117,8 +118,8 @@ public class ConsistencyChecker {
      * @throws IOException
      */
     public ConsistencyChecker(File directory, long debugInterval)
-            throws IOException {
-        store = FileStore.builder(directory).buildReadOnly();
+            throws IOException, InvalidFileStoreVersionException {
+        store = fileStoreBuilder(directory).buildReadOnly();
         this.debugInterval = debugInterval;
     }
 
@@ -246,6 +247,7 @@ public class ConsistencyChecker {
         return false;
     }
 
+    @Override
     public void close() {
         store.close();
     }

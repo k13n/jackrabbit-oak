@@ -22,6 +22,7 @@ package org.apache.jackrabbit.oak.plugins.blob.datastore;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.collect.Iterators.filter;
 import static com.google.common.collect.Iterators.transform;
+import static org.apache.commons.io.IOUtils.closeQuietly;
 
 import java.io.BufferedInputStream;
 import java.io.ByteArrayInputStream;
@@ -57,6 +58,7 @@ import org.apache.jackrabbit.core.data.MultiDataStoreAware;
 import org.apache.jackrabbit.oak.cache.CacheLIRS;
 import org.apache.jackrabbit.oak.cache.CacheStats;
 import org.apache.jackrabbit.oak.commons.StringUtils;
+import org.apache.jackrabbit.oak.plugins.blob.BlobTrackingStore;
 import org.apache.jackrabbit.oak.plugins.blob.SharedDataStore;
 import org.apache.jackrabbit.oak.spi.blob.BlobStore;
 import org.apache.jackrabbit.oak.spi.blob.stats.StatsCollectingStreams;
@@ -70,13 +72,15 @@ import org.slf4j.LoggerFactory;
  * It also handles inlining binaries if there size is smaller than
  * {@link org.apache.jackrabbit.core.data.DataStore#getMinRecordLength()}
  */
-public class DataStoreBlobStore implements DataStore, SharedDataStore, BlobStore,
-        GarbageCollectableBlobStore {
+public class DataStoreBlobStore implements DataStore, BlobStore,
+        GarbageCollectableBlobStore, BlobTrackingStore {
     private final Logger log = LoggerFactory.getLogger(getClass());
 
-    private final DataStore delegate;
+    protected final DataStore delegate;
 
-    private BlobStatsCollector stats = BlobStatsCollector.NOOP;
+    protected BlobStatsCollector stats = BlobStatsCollector.NOOP;
+
+    private BlobTracker tracker;
 
     /**
      * If set to true then the blob length information would be encoded as part of blobId
@@ -194,6 +198,7 @@ public class DataStoreBlobStore implements DataStore, SharedDataStore, BlobStore
     public void close() throws DataStoreException {
         delegate.close();
         cache.invalidateAll();
+        closeQuietly(tracker);
     }
 
     //~-------------------------------------------< BlobStore >
@@ -206,6 +211,14 @@ public class DataStoreBlobStore implements DataStore, SharedDataStore, BlobStore
             checkNotNull(stream);
             DataRecord dr = writeStream(stream);
             String id = getBlobId(dr);
+            if (tracker != null && !InMemoryDataRecord.isInstance(id)) {
+                try {
+                    tracker.add(id);
+                    log.trace("Tracked Id {}", id);
+                } catch (Exception e) {
+                    log.warn("Could not add track id", e);
+                }
+            }
             threw = false;
             stats.uploaded(System.nanoTime() - start, TimeUnit.NANOSECONDS, dr.getLength());
             stats.uploadCompleted(id);
@@ -332,7 +345,7 @@ public class DataStoreBlobStore implements DataStore, SharedDataStore, BlobStore
             in = new FileInputStream(file);
             return writeBlob(in);
         } finally {
-            org.apache.commons.io.IOUtils.closeQuietly(in);
+            closeQuietly(in);
             FileUtils.forceDelete(file);
         }
     }
@@ -364,18 +377,7 @@ public class DataStoreBlobStore implements DataStore, SharedDataStore, BlobStore
 
     @Override
     public Iterator<String> getAllChunkIds(final long maxLastModifiedTime) throws Exception {
-        return transform(filter(transform(delegate.getAllIdentifiers(), new Function<DataIdentifier, DataRecord>() {
-            @Nullable
-            @Override
-            public DataRecord apply(@Nullable DataIdentifier input) {
-                try {
-                    return delegate.getRecord(input);
-                } catch (DataStoreException e) {
-                    log.warn("Error occurred while fetching DataRecord for identifier {}", input, e);
-                }
-                return null;
-            }
-        }), new Predicate<DataRecord>() {
+        return transform(filter(getAllRecords(), new Predicate<DataRecord>() {
             @Override
             public boolean apply(@Nullable DataRecord input) {
                 if (input != null && (maxLastModifiedTime <= 0
@@ -407,7 +409,7 @@ public class DataStoreBlobStore implements DataStore, SharedDataStore, BlobStore
             for (String chunkId : chunkIds) {
                 String blobId = extractBlobId(chunkId);
                 DataIdentifier identifier = new DataIdentifier(blobId);
-                DataRecord dataRecord = delegate.getRecord(identifier);
+                DataRecord dataRecord = getRecordForId(identifier);
                 boolean success = (maxLastModifiedTime <= 0)
                         || dataRecord.getLastModified() <= maxLastModifiedTime;
                 log.trace("Deleting blob [{}] with last modified date [{}] : [{}]", blobId,
@@ -437,6 +439,13 @@ public class DataStoreBlobStore implements DataStore, SharedDataStore, BlobStore
         }
     }
 
+    @Override
+    public void addMetadataRecord(File f, String name) throws DataStoreException {
+        if (delegate instanceof SharedDataStore) {
+            ((SharedDataStore) delegate).addMetadataRecord(f, name);
+        }
+    }
+
     @Override public DataRecord getMetadataRecord(String name) {
         if (delegate instanceof SharedDataStore) {
             return ((SharedDataStore) delegate).getMetadataRecord(name);
@@ -462,6 +471,34 @@ public class DataStoreBlobStore implements DataStore, SharedDataStore, BlobStore
         if (delegate instanceof SharedDataStore) {
             ((SharedDataStore) delegate).deleteAllMetadataRecords(prefix);
         }
+    }
+
+    @Override
+    public Iterator<DataRecord> getAllRecords() throws DataStoreException {
+        if (delegate instanceof SharedDataStore) {
+            return ((SharedDataStore) delegate).getAllRecords();
+        } else {
+            return Iterators.transform(delegate.getAllIdentifiers(),
+                new Function<DataIdentifier, DataRecord>() {
+                    @Nullable @Override
+                    public DataRecord apply(@Nullable DataIdentifier input) {
+                        try {
+                            return delegate.getRecord(input);
+                        } catch (DataStoreException e) {
+                            log.warn("Error occurred while fetching DataRecord for identifier {}", input, e);
+                        }
+                        return null;
+                    }
+            });
+        }
+    }
+
+    @Override
+    public DataRecord getRecordForId(DataIdentifier identifier) throws DataStoreException {
+        if (delegate instanceof SharedDataStore) {
+            return ((SharedDataStore) delegate).getRecordForId(identifier);
+        }
+        return delegate.getRecord(identifier);
     }
 
     @Override
@@ -497,9 +534,22 @@ public class DataStoreBlobStore implements DataStore, SharedDataStore, BlobStore
         this.stats = stats;
     }
 
+
+    @Override
+    public void addTracker(BlobTracker tracker) {
+        this.tracker = tracker;
+    }
+
+    @Override
+    @Nullable
+    public BlobTracker getTracker() {
+        return tracker;
+    }
+
+
     //~---------------------------------------------< Internal >
 
-    private InputStream getStream(String blobId) throws IOException {
+    protected InputStream getStream(String blobId) throws IOException {
         try {
             InputStream in = getDataRecord(blobId).getStream();
             if (!(in instanceof BufferedInputStream)){
@@ -511,7 +561,7 @@ public class DataStoreBlobStore implements DataStore, SharedDataStore, BlobStore
         }
     }
 
-    private DataRecord getDataRecord(String blobId) throws DataStoreException {
+    protected DataRecord getDataRecord(String blobId) throws DataStoreException {
         DataRecord id;
         if (InMemoryDataRecord.isInstance(blobId)) {
             id = InMemoryDataRecord.getInstance(blobId);
@@ -566,7 +616,7 @@ public class DataStoreBlobStore implements DataStore, SharedDataStore, BlobStore
         return dr.getIdentifier().toString();
     }
 
-    private String extractBlobId(String encodedBlobId) {
+    protected String extractBlobId(String encodedBlobId) {
         if (encodeLengthInId) {
             return BlobId.of(encodedBlobId).blobId;
         }

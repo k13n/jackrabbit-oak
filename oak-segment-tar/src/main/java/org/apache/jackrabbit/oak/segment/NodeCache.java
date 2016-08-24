@@ -28,97 +28,191 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import javax.annotation.CheckForNull;
+import javax.annotation.Nonnull;
+
 import com.google.common.base.Supplier;
+import com.google.common.cache.CacheStats;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-// FIXME OAK-4277: Finalise de-duplication caches
-// implement configuration, monitoring and management
-// add unit tests
-// document, nullability
-public class NodeCache {
-    private static final Logger LOG = LoggerFactory.getLogger(NodeCache.class);
+/**
+ * Partial mapping of string keys to values of type {@link RecordId}. This is
+ * typically used for de-duplicating nodes that have already been persisted and thus
+ * already have a {@code RecordId}.
+ */
+public abstract class NodeCache {
+    private long hitCount;
+    private long missCount;
+    private long loadCount;
+    private long evictionCount;
 
-    private final int capacity;
-    private final List<Map<String, RecordId>> nodes;
+    /**
+     * Add a mapping from {@code key} to {@code value} where {@code value} is the
+     * id of a node at the given {@code depth}. Any existing mapping is replaced.
+     */
+    public abstract void put(@Nonnull String key, @Nonnull RecordId value, int depth);
 
-    private int size;
+    /**
+     * @return  The mapping for {@code key}, or {@code null} if none.
+     */
+    @CheckForNull
+    public abstract RecordId get(@Nonnull String key);
 
-    private final Set<Integer> muteDepths = newHashSet();
+    /**
+     * @return number of mappings
+     */
+    public abstract long size();
 
-    public static final Supplier<NodeCache> factory(final int capacity, final int maxDepth) {
-        return new Supplier<NodeCache>() {
-            @Override
-            public NodeCache get() {
-                return new NodeCache(capacity, maxDepth);
-            }
-        };
+    /**
+     * @return  access statistics for this cache
+     */
+    @Nonnull
+    public CacheStats getStats() {
+        return new CacheStats(hitCount, missCount, loadCount, 0, 0, evictionCount);
     }
 
-    public static final Supplier<NodeCache> empty() {
-        return new Supplier<NodeCache>() {
-            @Override
-            public NodeCache get() {
-                return new NodeCache(0, 0) {
-                    @Override
-                    public synchronized void put(String key, RecordId value, int depth) { }
+    /**
+     * Factory method for creating {@code NodeCache} instances with a given
+     * {@code capacity} and maximal depth. The returned instances are all
+     * thread safe.
+     *
+     * Mappings with a depth exceeding {@code maxDepth} will not be added.
+     *
+     * If the number of mappings exceed {@code capacity} the maximal depth
+     * is decreased and all mappings exceeding that new value are removed.
+     *
+     * @param capacity   maximal number of mappings
+     * @param maxDepth   maximal depth
+     * @return  A new {@code RecordCache} instance of the given {@code size}.
+     */
 
-                    @Override
-                    public synchronized RecordId get(String key) { return null; }
-                };
-            }
-        };
-    }
-
-    public NodeCache(int capacity, int maxDepth) {
-        checkArgument(capacity > 0);
-        checkArgument(maxDepth > 0);
-        this.capacity = capacity;
-        this.nodes = newArrayList();
-        for (int k = 0; k < maxDepth; k++) {
-            nodes.add(new HashMap<String, RecordId>());
-        }
-    }
-
-    public synchronized void put(String key, RecordId value, int depth) {
-        // FIXME OAK-4277: Finalise de-duplication caches
-        // Validate and optimise the eviction strategy.
-        // Nodes with many children should probably get a boost to
-        // protecting them from preemptive eviction. Also it might be
-        // necessary to implement pinning (e.g. for checkpoints).
-        while (size >= capacity) {
-            int d = nodes.size() - 1;
-            int removed = nodes.remove(d).size();
-            size -= removed;
-            if (removed > 0) {
-                // FIXME OAK-4165: Too verbose logging during revision gc
-                LOG.info("Evicted cache at depth {} as size {} reached capacity {}. " +
-                    "New size is {}", d, size + removed, capacity, size);
-            }
-        }
-
-        if (depth < nodes.size()) {
-            if (nodes.get(depth).put(key, value) == null) {
-                size++;
-            }
+    @Nonnull
+    public static NodeCache newNodeCache(int capacity, int maxDepth) {
+        if (capacity <= 0) {
+            return new NodeCache.Empty();
         } else {
-            if (muteDepths.add(depth)) {
-                LOG.info("Not caching {} -> {} as depth {} reaches or exceeds the maximum of {}",
-                    key, value, depth, nodes.size());
-            }
+            return new NodeCache.Default(capacity, maxDepth);
         }
     }
 
-    public synchronized RecordId get(String key) {
-        for (Map<String, RecordId> map : nodes) {
-            if (!map.isEmpty()) {
-                RecordId recordId = map.get(key);
-                if (recordId != null) {
-                    return recordId;
+    /**
+     * @return  A factory returning {@code Node} instances of the given
+     *          {@code capacity} and {@code maxDepth} when invoked.
+     * @see #newNodeCache(int, int)
+     */
+    @Nonnull
+    public static Supplier<NodeCache> factory(int capacity, int maxDepth) {
+        if (capacity <= 0) {
+            return NodeCache.Empty.supplier();
+        } else {
+            return NodeCache.Default.supplier(capacity, maxDepth);
+        }
+    }
+
+    private static class Empty extends NodeCache {
+        static final Supplier<NodeCache> supplier() {
+            return  new Supplier<NodeCache>() {
+                @Override
+                public NodeCache get() {
+                    return new NodeCache.Empty();
+                }
+            };
+        }
+
+        @Override
+        public synchronized void put(@Nonnull String key, @Nonnull RecordId value, int depth) { }
+
+        @Override
+        public synchronized RecordId get(@Nonnull String key) {
+            super.missCount++;
+            return null;
+        }
+
+        @Override
+        public long size() {
+            return 0;
+        }
+    }
+
+    private static class Default extends NodeCache {
+        private static final Logger LOG = LoggerFactory.getLogger(Default.class);
+
+        private final int capacity;
+        private final List<Map<String, RecordId>> caches;
+
+        private int size;
+
+        private final Set<Integer> muteDepths = newHashSet();
+
+        static final Supplier<NodeCache> supplier(final int capacity, final int size) {
+            return new Supplier<NodeCache>() {
+                @Override
+                public NodeCache get() {
+                    return new NodeCache.Default(capacity, size);
+                }
+            };
+        }
+
+        Default(int capacity, int maxDepth) {
+            checkArgument(capacity > 0);
+            checkArgument(maxDepth > 0);
+            this.capacity = capacity;
+            this.caches = newArrayList();
+            for (int k = 0; k < maxDepth; k++) {
+                caches.add(new HashMap<String, RecordId>());
+            }
+        }
+
+        @Override
+        public synchronized void put(@Nonnull String key, @Nonnull RecordId value, int depth) {
+            while (size >= capacity) {
+                int d = caches.size() - 1;
+                int removed = caches.remove(d).size();
+                size -= removed;
+                super.evictionCount -= removed;
+                if (removed > 0) {
+                    LOG.info("Evicted cache at depth {} as size {} reached capacity {}. " +
+                            "New size is {}", d, size + removed, capacity, size);
+                }
+            }
+
+            if (depth < caches.size()) {
+                if (caches.get(depth).put(key, value) == null) {
+                    super.loadCount++;
+                    size++;
+                }
+            } else {
+                if (muteDepths.add(depth)) {
+                    LOG.info("Not caching {} -> {} as depth {} reaches or exceeds the maximum of {}",
+                            key, value, depth, caches.size());
                 }
             }
         }
-        return null;
+
+        @Override
+        public synchronized RecordId get(@Nonnull String key) {
+            for (Map<String, RecordId> cache : caches) {
+                if (!cache.isEmpty()) {
+                    RecordId recordId = cache.get(key);
+                    if (recordId != null) {
+                        super.hitCount++;
+                        return recordId;
+                    }
+                }
+            }
+            super.missCount++;
+            return null;
+        }
+
+        @Override
+        public synchronized long size() {
+            long size = 0;
+            for (Map<String, RecordId> cache : caches) {
+                size += cache.size();
+            }
+            return size;
+        }
     }
 
 }

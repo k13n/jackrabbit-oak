@@ -31,9 +31,16 @@ import org.apache.jackrabbit.oak.segment.RecordId;
 import org.apache.jackrabbit.oak.segment.Revisions;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 
+/**
+ * This is a simple in memory {@code Revisions} implementation.
+ * It is non blocking and does not support any {@link Option}s.
+ */
 public class MemoryStoreRevisions implements Revisions {
     private RecordId head;
 
+    /**
+     * Bind this instance to a {@code store}.
+     */
     public void bind(MemoryStore store) throws IOException {
         if (head == null) {
             NodeBuilder builder = EMPTY_NODE.builder();
@@ -56,10 +63,10 @@ public class MemoryStoreRevisions implements Revisions {
 
     @Override
     public synchronized boolean setHead(
-            @Nonnull RecordId base, @Nonnull RecordId head,
+            @Nonnull RecordId expected, @Nonnull RecordId head,
             @Nonnull Option... options) {
         checkBound();
-        if (this.head.equals(base)) {
+        if (this.head.equals(expected)) {
             this.head = head;
             return true;
         } else {
@@ -67,6 +74,10 @@ public class MemoryStoreRevisions implements Revisions {
         }
     }
 
+    /**
+     * Not supported: throws {@code UnsupportedOperationException}
+     * @throws UnsupportedOperationException always
+     */
     @Override
     public boolean setHead(
             @Nonnull Function<RecordId, RecordId> newHead,

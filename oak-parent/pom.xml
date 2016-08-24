@@ -42,7 +42,7 @@
     <project.reporting.outputEncoding>
       ${project.build.sourceEncoding}
     </project.reporting.outputEncoding>
-    <jackrabbit.version>2.12.1</jackrabbit.version>
+    <jackrabbit.version>2.13.1</jackrabbit.version>
     <mongo.host>127.0.0.1</mongo.host>
     <mongo.port>27017</mongo.port>
     <mongo.db>MongoMKDB</mongo.db>
@@ -73,6 +73,7 @@
    <!-- whether skip the surefire unit testing during the integration testing. 
       Override with -Dsurefire.skip.ut=true when needed -->
     <surefire.skip.ut>false</surefire.skip.ut>
+    <segment.tar.version>0.0.8</segment.tar.version>
   </properties>
 
   <issueManagement>
@@ -104,7 +105,7 @@
           <configuration>
             <source>${java.version}</source>
             <links>
-              <link>http://docs.oracle.com/javase/6/docs/api/</link>
+              <link>http://docs.oracle.com/javase/7/docs/api/</link>
               <link>http://www.day.com/specs/javax.jcr/javadocs/jcr-2.0/</link>
             </links>
           </configuration>
@@ -168,6 +169,8 @@
                   <filter>!org.apache.jackrabbit.oak.namepath</filter>
                   <filter>!org.apache.jackrabbit.oak.osgi</filter>
                   <filter>!org.apache.jackrabbit.oak.plugins.atomic</filter>
+                  <filter>!org.apache.jackrabbit.oak.plugins.blob</filter>
+                  <filter>!org.apache.jackrabbit.oak.plugins.blob.datastore</filter>
                   <filter>!org.apache.jackrabbit.oak.plugins.commit</filter>
                   <filter>!org.apache.jackrabbit.oak.plugins.identifier</filter>
                   <filter>!org.apache.jackrabbit.oak.plugins.index</filter>
@@ -540,7 +543,7 @@
       <dependency>
         <groupId>org.apache.commons</groupId>
         <artifactId>commons-math3</artifactId>
-        <version>3.2</version>
+        <version>3.6.1</version>
       </dependency>
     </dependencies>
   </dependencyManagement>
@@ -806,7 +809,7 @@
         <dependency>
           <groupId>mysql</groupId>
           <artifactId>mysql-connector-java</artifactId>
-          <version>5.1.38</version>
+          <version>5.1.39</version>
         </dependency>
       </dependencies>
     </profile>

@@ -29,6 +29,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -64,6 +65,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 
 import com.google.common.base.Throwables;
 import com.google.common.collect.Iterables;
@@ -91,6 +93,7 @@ import org.apache.jackrabbit.oak.spi.commit.Editor;
 import org.apache.jackrabbit.oak.spi.commit.EditorHook;
 import org.apache.jackrabbit.oak.spi.commit.EditorProvider;
 import org.apache.jackrabbit.oak.spi.commit.EmptyHook;
+import org.apache.jackrabbit.oak.spi.commit.Observer;
 import org.apache.jackrabbit.oak.spi.state.ChildNodeEntry;
 import org.apache.jackrabbit.oak.spi.state.DefaultNodeStateDiff;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
@@ -98,6 +101,7 @@ import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
 import org.apache.jackrabbit.oak.stats.Clock;
 import org.junit.After;
+import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.slf4j.Logger;
@@ -218,14 +222,8 @@ public class DocumentNodeStoreTest {
         }
         store.merge(root, EmptyHook.INSTANCE, CommitInfo.EMPTY);
         counter.set(0);
-        // the following should just make one call to DocumentStore.query()
-        for (ChildNodeEntry e : store.getRoot().getChildNodeEntries()) {
-            e.getNodeState();
-        }
-        assertEquals(1, counter.get());
-
-        counter.set(0);
-        // now the child node entries are cached and no call should happen
+        // the following must read from the nodeChildrenCache populated by
+        // the commit and not use a query on the document store (OAK-1322)
         for (ChildNodeEntry e : store.getRoot().getChildNodeEntries()) {
             e.getNodeState();
         }
@@ -271,7 +269,7 @@ public class DocumentNodeStoreTest {
             public void run() {
                 try {
                     Revision r = store.newRevision();
-                    Commit c = new Commit(store, r, head, null);
+                    Commit c = new Commit(store, r, head);
                     c.addNode(new DocumentNodeState(store, "/newConflictingNode", new RevisionVector(r)));
                     c.addNode(new DocumentNodeState(store, "/deletedNode", new RevisionVector(r)));
                     c.updateProperty("/updateNode", "foo", "baz");
@@ -289,7 +287,7 @@ public class DocumentNodeStoreTest {
         created.acquireUninterruptibly();
         // commit will succeed and add collision marker to writer commit
         Revision r = store.newRevision();
-        Commit c = new Commit(store, r, head, null);
+        Commit c = new Commit(store, r, head);
         c.addNode(new DocumentNodeState(store, "/newConflictingNode", new RevisionVector(r)));
         c.addNode(new DocumentNodeState(store, "/newNonConflictingNode", new RevisionVector(r)));
         c.apply();
@@ -1595,6 +1593,18 @@ public class DocumentNodeStoreTest {
 
     }
 
+    // OAK-4545
+    @Test
+    public void configurableMaxBackOffMillis() throws Exception {
+        System.setProperty("oak.maxBackOffMS", "1234");
+        try {
+            DocumentNodeStore ns = builderProvider.newBuilder().getNodeStore();
+            assertEquals(1234, ns.getMaxBackOffMillis());
+        } finally {
+            System.clearProperty("oak.maxBackOffMS");
+        }
+    }
+
     // OAK-3579
     @Test
     public void backgroundLeaseUpdateThread() throws Exception {
@@ -1664,14 +1674,10 @@ public class DocumentNodeStoreTest {
         merge(ns2, b2);
 
         // on cluster node 2, remove of child-0 is not yet visible
-        List<ChildNodeEntry> children = Lists.newArrayList(ns2.getRoot().getChildNode("foo").getChildNode("bar").getChildNodeEntries());
+        DocumentNodeState bar = asDocumentNodeState(ns2.getRoot().getChildNode("foo").getChildNode("bar"));
+        List<ChildNodeEntry> children = Lists.newArrayList(bar.getChildNodeEntries());
         assertEquals(2, Iterables.size(children));
-        RevisionVector invalidate = null;
-        for (ChildNodeEntry entry : children) {
-            if (entry.getName().equals("child-0")) {
-                invalidate = asDocumentNodeState(entry.getNodeState()).getRevision();
-            }
-        }
+        RevisionVector invalidate = bar.getLastRevision();
         assertNotNull(invalidate);
 
         // this will make changes from cluster node 1 visible
@@ -2161,6 +2167,10 @@ public class DocumentNodeStoreTest {
     // OAK-1970
     @Test
     public void diffMany() throws Exception {
+        // make sure diffMany is used and not the new
+        // journal diff introduced with OAK-4528
+        System.setProperty("oak.disableJournalDiff", "true");
+
         Clock clock = new Clock.Virtual();
         clock.waitUntil(System.currentTimeMillis());
         Revision.setClock(clock);
@@ -2212,15 +2222,19 @@ public class DocumentNodeStoreTest {
         NodeState afterTest = after.getChildNode("test");
 
         startValues.clear();
+        // make sure diff is not served from node children cache entries
+        ns.invalidateNodeChildrenCache();
         afterTest.compareAgainstBaseState(beforeTest, new DefaultNodeStateDiff());
 
         assertEquals(1, startValues.size());
-        Revision localHead = before.getRevision().getRevision(ns.getClusterId());
+        Revision localHead = before.getRootRevision().getRevision(ns.getClusterId());
         assertNotNull(localHead);
         long beforeModified = getModifiedInSecs(localHead.getTimestamp());
         // startValue must be based on the revision of the before state
         // and not when '/test' was last modified
         assertEquals(beforeModified, (long) startValues.get(0));
+
+        System.clearProperty("oak.disableJournalDiff");
     }
 
     // OAK-2620
@@ -2317,7 +2331,9 @@ public class DocumentNodeStoreTest {
         builder.child("foo");
         b.setRoot(builder.getNodeState());
         // branch state is now InMemory
-        builder.child("bar").setProperty("p", "foo");
+        for (int i = 0; i < DocumentRootBuilder.UPDATE_LIMIT; i++) {
+            builder.child("bar").setProperty("p-" + i, "foo");
+        }
         b.setRoot(builder.getNodeState());
         // branch state is now Persisted
 
@@ -2554,7 +2570,9 @@ public class DocumentNodeStoreTest {
         builder.child("parent").child("node-x").child("child").child("x");
         b.setRoot(builder.getNodeState());
         // branch state is now InMemory
-        builder.child("b");
+        for (int i = 0; i < DocumentRootBuilder.UPDATE_LIMIT; i++) {
+            builder.child("b" + i);
+        }
         b.setRoot(builder.getNodeState());
         // branch state is now Persisted
         builder.child("c");
@@ -2566,6 +2584,49 @@ public class DocumentNodeStoreTest {
         TrackingDiff diff = new TrackingDiff();
         head.compareAgainstBaseState(root, diff);
         assertTrue(diff.modified.contains("/parent/node-x/child"));
+    }
+
+    // OAK-4600
+    @Test
+    public void nodeChildrenCacheForBranchCommit() throws Exception {
+        DocumentNodeStore ns = builderProvider.newBuilder().getNodeStore();
+
+        NodeBuilder b1 = ns.getRoot().builder();
+
+        //this would push children cache entries as childX->subChildX
+        for (int i = 0; i < DocumentRootBuilder.UPDATE_LIMIT + 1; i++) {
+            b1.child("child" + i).child("subChild" + i);
+        }
+
+        //The fetch would happen on "br" format of revision
+        for (int i = 0; i < DocumentRootBuilder.UPDATE_LIMIT + 1; i++) {
+            Iterables.size(b1.getChildNode("child" + i).getChildNodeNames());
+        }
+
+        //must not have duplicated cache entries
+        assertTrue(ns.getNodeChildrenCacheStats().getElementCount() < 2*DocumentRootBuilder.UPDATE_LIMIT);
+    }
+
+    // OAK-4601
+    @Test
+    public void nodeCacheForBranchCommit() throws Exception {
+        DocumentNodeStore ns = builderProvider.newBuilder().getNodeStore();
+
+        NodeBuilder b1 = ns.getRoot().builder();
+
+        final int NUM_CHILDREN = 3*DocumentRootBuilder.UPDATE_LIMIT + 1;
+        //this would push node cache entries for children
+        for (int i = 0; i < NUM_CHILDREN; i++) {
+            b1.child("child" + i);
+        }
+
+        //this would push cache entries
+        for (int i = 0; i < NUM_CHILDREN; i++) {
+            b1.getChildNode("child" + i);
+        }
+
+        //must not have duplicated cache entries
+        assertTrue(ns.getNodeCacheStats().getElementCount() < 2*NUM_CHILDREN);
     }
 
     @Test
@@ -2644,6 +2705,37 @@ public class DocumentNodeStoreTest {
         assertTrue(parent.hasChildNode("foo"));
         assertTrue(parent.hasChildNode("bar"));
         assertTrue(parent.hasChildNode("baz"));
+    }
+
+    @Ignore("OAK-4687")
+    @Test
+    public void exceptionHandlingInCommit() throws Exception{
+        DocumentNodeStore ns = builderProvider.newBuilder().getNodeStore();
+        final TestException testException = new TestException();
+        final AtomicBoolean failCommit = new AtomicBoolean();
+        ns.addObserver(new Observer() {
+            @Override
+            public void contentChanged(@Nonnull NodeState root, @Nullable CommitInfo info) {
+                if (failCommit.get()){
+                    throw testException;
+                }
+            }
+        });
+
+
+        NodeBuilder b1 = ns.getRoot().builder();
+        b1.child("parent");
+        failCommit.set(true);
+        try {
+            merge(ns, b1);
+            fail();
+        } catch(Exception e){
+            assertSame(testException, Throwables.getRootCause(e));
+        }
+    }
+
+    private static class TestException extends RuntimeException {
+
     }
 
     private static DocumentNodeState asDocumentNodeState(NodeState state) {

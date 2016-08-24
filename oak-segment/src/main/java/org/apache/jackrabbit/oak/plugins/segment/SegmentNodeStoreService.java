@@ -60,13 +60,16 @@ import org.apache.jackrabbit.oak.api.Descriptors;
 import org.apache.jackrabbit.oak.api.jmx.CacheStatsMBean;
 import org.apache.jackrabbit.oak.api.jmx.CheckpointMBean;
 import org.apache.jackrabbit.oak.cache.CacheStats;
+import org.apache.jackrabbit.oak.commons.PropertiesUtil;
 import org.apache.jackrabbit.oak.osgi.ObserverTracker;
 import org.apache.jackrabbit.oak.osgi.OsgiWhiteboard;
 import org.apache.jackrabbit.oak.plugins.blob.BlobGC;
 import org.apache.jackrabbit.oak.plugins.blob.BlobGCMBean;
 import org.apache.jackrabbit.oak.plugins.blob.BlobGarbageCollector;
+import org.apache.jackrabbit.oak.plugins.blob.BlobTrackingStore;
 import org.apache.jackrabbit.oak.plugins.blob.MarkSweepGarbageCollector;
 import org.apache.jackrabbit.oak.plugins.blob.SharedDataStore;
+import org.apache.jackrabbit.oak.plugins.blob.datastore.BlobIdTracker;
 import org.apache.jackrabbit.oak.plugins.blob.datastore.SharedDataStoreUtils;
 import org.apache.jackrabbit.oak.plugins.blob.datastore.SharedDataStoreUtils.SharedStoreRecordType;
 import org.apache.jackrabbit.oak.plugins.identifier.ClusterRepositoryInfo;
@@ -79,6 +82,7 @@ import org.apache.jackrabbit.oak.plugins.segment.file.FileStore.Builder;
 import org.apache.jackrabbit.oak.plugins.segment.file.FileStoreGCMonitor;
 import org.apache.jackrabbit.oak.plugins.segment.file.FileStoreStatsMBean;
 import org.apache.jackrabbit.oak.plugins.segment.file.GCMonitorMBean;
+import org.apache.jackrabbit.oak.plugins.segment.file.InvalidFileStoreVersionException;
 import org.apache.jackrabbit.oak.spi.blob.BlobStore;
 import org.apache.jackrabbit.oak.spi.blob.GarbageCollectableBlobStore;
 import org.apache.jackrabbit.oak.spi.commit.Observable;
@@ -86,6 +90,7 @@ import org.apache.jackrabbit.oak.spi.commit.Observer;
 import org.apache.jackrabbit.oak.spi.gc.GCMonitor;
 import org.apache.jackrabbit.oak.spi.gc.GCMonitorTracker;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
+import org.apache.jackrabbit.oak.spi.state.NodeStoreProvider;
 import org.apache.jackrabbit.oak.spi.state.ProxyNodeStore;
 import org.apache.jackrabbit.oak.spi.state.RevisionGC;
 import org.apache.jackrabbit.oak.spi.state.RevisionGCMBean;
@@ -237,6 +242,13 @@ public class SegmentNodeStoreService extends ProxyNodeStore
     )
     public static final String STANDBY = "standby";
 
+    @Property(
+            boolValue = false,
+            label = "Secondary Store Mode",
+            description = "Flag indicating that this component will not register as a NodeStore but just as a SecondaryNodeStoreProvider"
+    )
+    public static final String SECONDARY_STORE = "secondary";
+
     @Property(boolValue = false,
             label = "Custom BlobStore",
             description = "Boolean value indicating that a custom BlobStore is to be used. " +
@@ -297,6 +309,17 @@ public class SegmentNodeStoreService extends ProxyNodeStore
     )
     public static final String PROP_BLOB_GC_MAX_AGE = "blobGcMaxAgeInSecs";
 
+    /**
+     * Default interval for taking snapshots of locally tracked blob ids.
+     */
+    private static final long DEFAULT_BLOB_SNAPSHOT_INTERVAL = 12 * 60 * 60;
+    @Property (longValue = DEFAULT_BLOB_SNAPSHOT_INTERVAL,
+        label = "Blob tracking snapshot interval (in secs)",
+        description = "This is the default interval in which the snapshots of locally tracked blob ids will"
+            + "be taken and synchronized with the blob store"
+    )
+    public static final String PROP_BLOB_SNAPSHOT_INTERVAL = "blobTrackSnapshotIntervalInSecs";
+
     @Override
     protected SegmentNodeStore getNodeStore() {
         checkState(segmentNodeStore != null, "service must be activated when used");
@@ -306,7 +329,8 @@ public class SegmentNodeStoreService extends ProxyNodeStore
     @Activate
     public void activate(ComponentContext context) throws IOException {
         this.context = context;
-        this.customBlobStore = Boolean.parseBoolean(property(CUSTOM_BLOB_STORE));
+        //In secondaryNodeStore mode customBlobStore is always enabled
+        this.customBlobStore = Boolean.parseBoolean(property(CUSTOM_BLOB_STORE)) || isSecondaryStoreMode();
 
         if (blobStore == null && customBlobStore) {
             log.info("BlobStore use enabled. SegmentNodeStore would be initialized when BlobStore would be available");
@@ -351,6 +375,11 @@ public class SegmentNodeStoreService extends ProxyNodeStore
                 return;
             }
 
+            if (isSecondaryStoreMode()){
+                registerSecondaryStore();
+                return;
+            }
+
             if (registerSegmentNodeStore()) {
                 Dictionary<String, Object> props = new Hashtable<String, Object>();
                 props.put(Constants.SERVICE_PID, SegmentNodeStore.class.getName());
@@ -358,6 +387,26 @@ public class SegmentNodeStoreService extends ProxyNodeStore
                 storeRegistration = context.getBundleContext().registerService(NodeStore.class.getName(), this, props);
             }
         }
+    }
+
+    private boolean isSecondaryStoreMode() {
+        return toBoolean(property(SECONDARY_STORE), false);
+    }
+
+    private void registerSecondaryStore() {
+        SegmentNodeStore.SegmentNodeStoreBuilder nodeStoreBuilder = SegmentNodeStore.builder(store);
+        nodeStoreBuilder.withCompactionStrategy(compactionStrategy);
+        segmentNodeStore = nodeStoreBuilder.build();
+        Dictionary<String, Object> props = new Hashtable<String, Object>();
+        props.put(NodeStoreProvider.ROLE, "secondary");
+        storeRegistration = context.getBundleContext().registerService(NodeStoreProvider.class.getName(), new NodeStoreProvider() {
+                    @Override
+                    public NodeStore getNodeStore() {
+                        return SegmentNodeStoreService.this;
+                    }
+                },
+                props);
+        log.info("Registered NodeStoreProvider backed by SegmentNodeStore");
     }
 
     private boolean registerSegmentStore() throws IOException {
@@ -387,7 +436,12 @@ public class SegmentNodeStoreService extends ProxyNodeStore
             builder.withBlobStore(blobStore);
         }
 
-        store = builder.build();
+        try {
+            store = builder.build();
+        } catch (InvalidFileStoreVersionException e) {
+            log.error("The segment store data is not compatible with the current version. Please use oak-segment-tar or a different version of oak-segment.");
+            return false;
+        }
 
         // Create a compaction strategy
 
@@ -572,6 +626,20 @@ public class SegmentNodeStoreService extends ProxyNodeStore
                         SharedStoreRecordType.REPOSITORY.getNameFromId(repoId));
             } catch (Exception e) {
                 throw new IOException("Could not register a unique repositoryId", e);
+            }
+
+            if (blobStore instanceof BlobTrackingStore) {
+                final long trackSnapshotInterval = toLong(property(PROP_BLOB_SNAPSHOT_INTERVAL),
+                    DEFAULT_BLOB_SNAPSHOT_INTERVAL);
+                String root = PropertiesUtil.toString(property(DIRECTORY), "./repository");
+
+                BlobTrackingStore trackingStore = (BlobTrackingStore) blobStore;
+                if (trackingStore.getTracker() != null) {
+                    trackingStore.getTracker().close();
+                }
+                ((BlobTrackingStore) blobStore).addTracker(
+                    new BlobIdTracker(root, repoId, trackSnapshotInterval, (SharedDataStore)
+                        blobStore));
             }
         }
 

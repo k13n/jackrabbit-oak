@@ -73,6 +73,7 @@ import org.slf4j.LoggerFactory;
 public class SegmentNodeStore implements NodeStore, Observable {
 
     public static class SegmentNodeStoreBuilder {
+        private static final Logger LOG = LoggerFactory.getLogger(SegmentNodeStoreBuilder.class);
 
         @Nonnull
         private final Revisions revisions;
@@ -103,7 +104,20 @@ public class SegmentNodeStore implements NodeStore, Observable {
         public SegmentNodeStore build() {
             checkState(!isCreated);
             isCreated = true;
+            LOG.info("Creating segment node store {}", this);
             return new SegmentNodeStore(this);
+        }
+
+        @Nonnull
+        private static String getString(@CheckForNull BlobStore blobStore) {
+            return "blobStore=" + (blobStore == null ? "inline" : blobStore);
+        }
+
+        @Override
+        public String toString() {
+            return "SegmentNodeStoreBuilder{" +
+                    getString(blobStore) +
+                    '}';
         }
     }
 
@@ -173,7 +187,7 @@ public class SegmentNodeStore implements NodeStore, Observable {
         this.reader = builder.reader;
         this.writer = builder.writer;
         this.blobStore = builder.blobStore;
-        this.head = new AtomicReference<SegmentNodeState>(reader.readHeadState());
+        this.head = new AtomicReference<SegmentNodeState>(reader.readHeadState(revisions));
         this.changeDispatcher = new ChangeDispatcher(getRoot());
     }
 
@@ -233,7 +247,7 @@ public class SegmentNodeStore implements NodeStore, Observable {
      * permit from the {@link #commitSemaphore}.
      */
     private void refreshHead() {
-        SegmentNodeState state = reader.readHeadState();
+        SegmentNodeState state = reader.readHeadState(revisions);
         if (!state.getRecordId().equals(head.get().getRecordId())) {
             head.set(state);
             changeDispatcher.contentChanged(state.getChildNode(ROOT), null);
@@ -255,18 +269,6 @@ public class SegmentNodeStore implements NodeStore, Observable {
             }
         }
         return head.get().getChildNode(ROOT);
-    }
-
-    @Nonnull
-    public NodeState getSuperRoot() {
-        if (commitSemaphore.tryAcquire()) {
-            try {
-                refreshHead();
-            } finally {
-                commitSemaphore.release();
-            }
-        }
-        return head.get();
     }
 
     @Override

@@ -16,7 +16,6 @@
  */
 package org.apache.jackrabbit.oak.plugins.index.lucene;
 
-import javax.annotation.Nullable;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -37,17 +36,15 @@ import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.commons.PathUtils;
 import org.apache.jackrabbit.oak.commons.io.LazyInputStream;
 import org.apache.jackrabbit.oak.plugins.index.IndexEditor;
-import org.apache.jackrabbit.oak.plugins.index.IndexUpdateCallback;
 import org.apache.jackrabbit.oak.plugins.index.PathFilter;
 import org.apache.jackrabbit.oak.plugins.index.fulltext.ExtractedText;
 import org.apache.jackrabbit.oak.plugins.index.fulltext.ExtractedText.ExtractionResult;
 import org.apache.jackrabbit.oak.plugins.index.lucene.Aggregate.Matcher;
+import org.apache.jackrabbit.oak.plugins.index.lucene.writer.LuceneIndexWriter;
 import org.apache.jackrabbit.oak.plugins.memory.EmptyNodeState;
 import org.apache.jackrabbit.oak.plugins.memory.StringPropertyState;
 import org.apache.jackrabbit.oak.plugins.tree.TreeFactory;
-import org.apache.jackrabbit.oak.query.QueryImpl;
 import org.apache.jackrabbit.oak.spi.commit.Editor;
-import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.apache.jackrabbit.oak.util.BlobByteSource;
 import org.apache.lucene.document.Document;
@@ -59,8 +56,6 @@ import org.apache.lucene.document.NumericDocValuesField;
 import org.apache.lucene.document.SortedDocValuesField;
 import org.apache.lucene.document.StringField;
 import org.apache.lucene.facet.sortedset.SortedSetDocValuesFacetField;
-import org.apache.lucene.index.IndexWriter;
-import org.apache.lucene.search.PrefixQuery;
 import org.apache.lucene.util.BytesRef;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.parser.ParseContext;
@@ -72,7 +67,6 @@ import static org.apache.jackrabbit.JcrConstants.JCR_DATA;
 import static org.apache.jackrabbit.oak.commons.PathUtils.concat;
 import static org.apache.jackrabbit.oak.commons.PathUtils.getName;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.FieldFactory.*;
-import static org.apache.jackrabbit.oak.plugins.index.lucene.TermFactory.newPathTerm;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.util.ConfigUtil.getPrimaryTypeName;
 
 /**
@@ -85,6 +79,9 @@ public class LuceneIndexEditor implements IndexEditor, Aggregate.AggregateRoot {
 
     private static final Logger log =
             LoggerFactory.getLogger(LuceneIndexEditor.class);
+
+    private static final long SMALL_BINARY = Long.getLong("oak.lucene.smallBinary", 16 * 1024);
+
     static final String TEXT_EXTRACTION_ERROR = "TextExtractionError";
 
     private final LuceneIndexEditorContext context;
@@ -101,8 +98,6 @@ public class LuceneIndexEditor implements IndexEditor, Aggregate.AggregateRoot {
     private boolean propertiesChanged = false;
 
     private List<PropertyState> propertiesModified = Lists.newArrayList();
-
-    private final NodeState root;
 
     /**
      * Flag indicating if the current tree being traversed has a deleted parent.
@@ -121,20 +116,14 @@ public class LuceneIndexEditor implements IndexEditor, Aggregate.AggregateRoot {
 
     private final PathFilter.Result pathFilterResult;
 
-    LuceneIndexEditor(NodeState root, NodeBuilder definition,
-                        IndexUpdateCallback updateCallback,
-                        @Nullable IndexCopier indexCopier,
-                        ExtractedTextCache extractedTextCache,
-                      IndexAugmentorFactory augmentorFactory) throws CommitFailedException {
+    LuceneIndexEditor(LuceneIndexEditorContext context) throws CommitFailedException {
         this.parent = null;
         this.name = null;
         this.path = "/";
-        this.context = new LuceneIndexEditorContext(root, definition,
-                updateCallback, indexCopier, extractedTextCache, augmentorFactory);
-        this.root = root;
+        this.context = context;
         this.isDeleted = false;
         this.matcherState = MatcherState.NONE;
-        this.pathFilterResult = context.getDefinition().getPathFilter().filter(getPath());
+        this.pathFilterResult = context.getDefinition().getPathFilter().filter(PathUtils.ROOT_PATH);
     }
 
     private LuceneIndexEditor(LuceneIndexEditor parent, String name,
@@ -145,7 +134,6 @@ public class LuceneIndexEditor implements IndexEditor, Aggregate.AggregateRoot {
         this.name = name;
         this.path = null;
         this.context = parent.context;
-        this.root = parent.root;
         this.isDeleted = isDeleted;
         this.matcherState = matcherState;
         this.pathFilterResult = pathFilterResult;
@@ -269,10 +257,9 @@ public class LuceneIndexEditor implements IndexEditor, Aggregate.AggregateRoot {
             // tree deletion is handled on the parent node
             String path = concat(getPath(), name);
             try {
-                IndexWriter writer = context.getWriter();
+                LuceneIndexWriter writer = context.getWriter();
                 // Remove all index entries in the removed subtree
-                writer.deleteDocuments(newPathTerm(path));
-                writer.deleteDocuments(new PrefixQuery(newPathTerm(path + "/")));
+                writer.deleteDocuments(path);
                 this.context.indexUpdate();
             } catch (IOException e) {
                 throw new CommitFailedException("Lucene", 5,
@@ -297,7 +284,7 @@ public class LuceneIndexEditor implements IndexEditor, Aggregate.AggregateRoot {
                     log.trace("[{}] Indexed document for {} is {}", getIndexName(), path, d);
                 }
                 context.indexUpdate();
-                context.getWriter().updateDocument(newPathTerm(path), d);
+                context.getWriter().updateDocument(path, d);
                 return true;
             }
         } catch (IOException e) {
@@ -948,6 +935,16 @@ public class LuceneIndexEditor implements IndexEditor, Aggregate.AggregateRoot {
         WriteOutContentHandler handler = new WriteOutContentHandler(context.getDefinition().getMaxExtractLength());
         long start = System.currentTimeMillis();
         long bytesRead = 0;
+        long length = v.length();
+        if (log.isDebugEnabled()) {
+            log.debug("Extracting {}, {} bytes, id {}", path, length, v.getContentIdentity());
+        }
+        String oldThreadName = null;
+        if (length > SMALL_BINARY) {
+            Thread t = Thread.currentThread();
+            oldThreadName = t.getName();
+            t.setName(oldThreadName + ": Extracting " + path + ", " + length + " bytes");
+        }
         try {
             CountingInputStream stream = new CountingInputStream(new LazyInputStream(new BlobByteSource(v)));
             try {
@@ -974,10 +971,20 @@ public class LuceneIndexEditor implements IndexEditor, Aggregate.AggregateRoot {
                 context.getExtractedTextCache().put(v, ExtractedText.ERROR);
                 return TEXT_EXTRACTION_ERROR;
             }
+        } finally {
+            if (oldThreadName != null) {
+                Thread.currentThread().setName(oldThreadName);
+            }
         }
         String result = handler.toString();
         if (bytesRead > 0) {
-            context.recordTextExtractionStats(System.currentTimeMillis() - start, bytesRead, result.length());
+            long time = System.currentTimeMillis() - start;
+            int len = result.length();
+            context.recordTextExtractionStats(time, bytesRead, len);
+            if (log.isDebugEnabled()) {
+                log.debug("Extracting {} took {} ms, {} bytes read, {} text size", 
+                        path, time, bytesRead, len);
+            }
         }
         context.getExtractedTextCache().put(v,  new ExtractedText(ExtractionResult.SUCCESS, result));
         return result;

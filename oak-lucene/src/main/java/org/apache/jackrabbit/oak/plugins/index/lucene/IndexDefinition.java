@@ -75,6 +75,7 @@ import static com.google.common.collect.Maps.newHashMap;
 import static com.google.common.collect.Sets.newHashSet;
 import static org.apache.jackrabbit.JcrConstants.JCR_SCORE;
 import static org.apache.jackrabbit.JcrConstants.NT_BASE;
+import static org.apache.jackrabbit.oak.api.Type.BOOLEAN;
 import static org.apache.jackrabbit.oak.api.Type.NAMES;
 import static org.apache.jackrabbit.oak.commons.PathUtils.getParentPath;
 import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.DECLARING_NODE_TYPES;
@@ -87,7 +88,7 @@ import static org.apache.jackrabbit.oak.plugins.index.lucene.util.ConfigUtil.get
 import static org.apache.jackrabbit.oak.plugins.memory.EmptyNodeState.EMPTY_NODE;
 import static org.apache.jackrabbit.oak.plugins.nodetype.NodeTypeConstants.NODE_TYPES_PATH;
 
-class IndexDefinition implements Aggregate.AggregateMapper {
+public final class IndexDefinition implements Aggregate.AggregateMapper {
     /**
      * Name of the internal property that contains the child order defined in
      * org.apache.jackrabbit.oak.plugins.tree.impl.TreeConstants
@@ -124,6 +125,16 @@ class IndexDefinition implements Aggregate.AggregateMapper {
      * System managed hidden property to record the current index version
      */
     static final String INDEX_VERSION = ":version";
+
+    /**
+     * Hidden node under index definition which is used to store meta info
+     */
+    static final String STATUS_NODE = ":status";
+
+    /**
+     * Meta property which provides the unique id
+     */
+    static final String PROP_UID = "uid";
 
     private static String TYPES_ALLOW_ALL_NAME = "all";
 
@@ -220,6 +231,9 @@ class IndexDefinition implements Aggregate.AggregateMapper {
 
     private final String indexPath;
 
+    @Nullable
+    private final String uid;
+
     public IndexDefinition(NodeState root, NodeBuilder defn) {
         this(root, defn.getBaseState(), defn);
     }
@@ -231,6 +245,7 @@ class IndexDefinition implements Aggregate.AggregateMapper {
     public IndexDefinition(NodeState root, NodeState defn, @Nullable NodeBuilder defnb) {
         this.root = root;
         this.version = determineIndexFormatVersion(defn, defnb);
+        this.uid = determineUniqueId(defn, defnb);
         this.definition = defn;
         this.indexPath = determineIndexPath(defn, defnb);
         this.indexName = indexPath;
@@ -376,10 +391,6 @@ class IndexDefinition implements Aggregate.AggregateMapper {
         return evaluatePathRestrictions;
     }
 
-    public boolean indexesAllTypes() {
-        return indexesAllTypes;
-    }
-
     public Analyzer getAnalyzer(){
         return analyzer;
     }
@@ -417,6 +428,11 @@ class IndexDefinition implements Aggregate.AggregateMapper {
         return queryPaths;
     }
 
+    @CheckForNull
+    public String getUniqueId() {
+        return uid;
+    }
+
     @Override
     public String toString() {
         return "Lucene Index : " + indexName;
@@ -450,10 +466,16 @@ class IndexDefinition implements Aggregate.AggregateMapper {
     private static Map<String, Analyzer> collectAnalyzers(NodeState defn) {
         Map<String, Analyzer> analyzerMap = newHashMap();
         NodeStateAnalyzerFactory factory = new NodeStateAnalyzerFactory(LuceneIndexConstants.VERSION);
-        for (ChildNodeEntry cne : defn.getChildNode(LuceneIndexConstants.ANALYZERS).getChildNodeEntries()) {
+        NodeState analyzersTree = defn.getChildNode(LuceneIndexConstants.ANALYZERS);
+        for (ChildNodeEntry cne : analyzersTree.getChildNodeEntries()) {
             Analyzer a = factory.createInstance(cne.getNodeState());
             analyzerMap.put(cne.getName(), a);
         }
+
+        if (getOptionalValue(analyzersTree, INDEX_ORIGINAL_TERM, false) && !analyzerMap.containsKey(ANL_DEFAULT)) {
+            analyzerMap.put(ANL_DEFAULT, new OakAnalyzer(VERSION, true));
+        }
+
         return ImmutableMap.copyOf(analyzerMap);
     }
 
@@ -1297,7 +1319,14 @@ class IndexDefinition implements Aggregate.AggregateMapper {
         String codecName = getOptionalValue(definition, LuceneIndexConstants.CODEC_NAME, null);
         Codec codec = null;
         if (codecName != null) {
+            // prevent LUCENE-6482
+            // (also done in LuceneIndexProviderService, just to be save)
+            OakCodec ensureLucene46CodecLoaded = new OakCodec();
+            // to ensure the JVM doesn't optimize away object creation
+            // (probably not really needed; just to be save)
+            log.debug("Lucene46Codec is loaded: {}", ensureLucene46CodecLoaded);
             codec = Codec.forName(codecName);
+            log.debug("Codec is loaded: {}", codecName);
         } else if (fullTextEnabled) {
             codec = new OakCodec();
         }
@@ -1506,6 +1535,24 @@ class IndexDefinition implements Aggregate.AggregateMapper {
             return defn.getProperty(REINDEX_COUNT).getValue(Type.LONG);
         }
         return 0;
+    }
+
+    @CheckForNull
+    private static String determineUniqueId(NodeState defn, @Nullable NodeBuilder defnb) {
+        String uid = null;
+
+        //Check in builder first as that would have latest value
+        if (defnb != null){
+            uid = defnb.getChildNode(STATUS_NODE).getString(PROP_UID);
+        }
+
+        //Fallback to NodeState
+        if (uid == null){
+            uid = defn.getChildNode(STATUS_NODE).getString(PROP_UID);
+        }
+
+        //uid can be null if an old format index has not received any update
+        return uid;
     }
 
     public boolean getActiveDeleteEnabled() {

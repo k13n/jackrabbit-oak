@@ -78,6 +78,9 @@ public class NodeNameImpl extends DynamicOperandImpl {
     @Override
     public PropertyValue currentProperty() {
         String path = selector.currentPath();
+        if (path == null) {
+            return null;
+        }
         String name = PathUtils.getName(path);
         // TODO reverse namespace remapping?
         return PropertyValues.newName(name);
@@ -100,6 +103,26 @@ public class NodeNameImpl extends DynamicOperandImpl {
     @Override
     public void restrictList(FilterImpl f, List<PropertyValue> list) {
         // optimizations of type "NAME(..) IN(A, B)" are not supported
+    }
+
+    @Override
+    public void restrictFunction(FilterImpl f, String functionName, Operator operator, PropertyValue v) {
+        if (operator == Operator.NOT_EQUAL) {
+            // not supported
+            return;
+        }
+        if (v == null) {
+            return;
+        }
+        String name = getName(query, v);
+        if (name != null && f.getSelector().equals(selector)
+                && NodeNameImpl.supportedOperator(operator)) {
+            String localName = NodeLocalNameImpl.getLocalName(name);
+            String restrictionName = QueryConstants.FUNCTION_RESTRICTION_PREFIX + 
+                    functionName + "*@" + QueryConstants.RESTRICTION_LOCAL_NAME;            
+            f.restrictProperty(restrictionName,
+                    operator, PropertyValues.newString(localName));
+        }
     }
 
     @Override

@@ -51,11 +51,13 @@ import org.apache.jackrabbit.oak.osgi.OsgiWhiteboard;
 import org.apache.jackrabbit.oak.plugins.index.IndexEditorProvider;
 import org.apache.jackrabbit.oak.plugins.index.aggregate.NodeAggregator;
 import org.apache.jackrabbit.oak.plugins.index.fulltext.PreExtractedTextProvider;
+import org.apache.jackrabbit.oak.plugins.index.lucene.reader.DefaultIndexReaderFactory;
 import org.apache.jackrabbit.oak.spi.commit.BackgroundObserver;
 import org.apache.jackrabbit.oak.plugins.index.lucene.score.ScorerProviderFactory;
 import org.apache.jackrabbit.oak.spi.commit.BackgroundObserverMBean;
 import org.apache.jackrabbit.oak.spi.commit.Observer;
 import org.apache.jackrabbit.oak.spi.gc.GCMonitor;
+import org.apache.jackrabbit.oak.spi.mount.MountInfoProvider;
 import org.apache.jackrabbit.oak.spi.query.QueryIndexProvider;
 import org.apache.jackrabbit.oak.spi.whiteboard.Registration;
 import org.apache.jackrabbit.oak.spi.whiteboard.Whiteboard;
@@ -205,6 +207,9 @@ public class LuceneIndexProviderService {
     )
     private volatile PreExtractedTextProvider extractedTextProvider;
 
+    @Reference
+    private MountInfoProvider mountInfoProvider;
+
     private IndexCopier indexCopier;
 
     private File indexDir;
@@ -227,6 +232,7 @@ public class LuceneIndexProviderService {
 
         configureBooleanClauseLimit(config);
         initializeFactoryClassLoaders(getClass().getClassLoader());
+
         whiteboard = new OsgiWhiteboard(bundleContext);
         threadPoolSize = PropertiesUtil.toInteger(config.get(PROP_THREAD_POOL_SIZE), PROP_THREAD_POOL_SIZE_DEFAULT);
         initializeExtractedTextCache(bundleContext, config);
@@ -312,10 +318,10 @@ public class LuceneIndexProviderService {
         LuceneIndexEditorProvider editorProvider;
         if (enableCopyOnWrite){
             initializeIndexCopier(bundleContext, config);
-            editorProvider = new LuceneIndexEditorProvider(indexCopier, extractedTextCache, augmentorFactory);
+            editorProvider = new LuceneIndexEditorProvider(indexCopier, extractedTextCache, augmentorFactory, mountInfoProvider);
             log.info("Enabling CopyOnWrite support. Index files would be copied under {}", indexDir.getAbsolutePath());
         } else {
-            editorProvider = new LuceneIndexEditorProvider(null, extractedTextCache, augmentorFactory);
+            editorProvider = new LuceneIndexEditorProvider(null, extractedTextCache, augmentorFactory, mountInfoProvider);
         }
         regs.add(bundleContext.registerService(IndexEditorProvider.class.getName(), editorProvider, null));
         oakRegs.add(registerMBean(whiteboard,
@@ -330,7 +336,7 @@ public class LuceneIndexProviderService {
         if (enableCopyOnRead){
             initializeIndexCopier(bundleContext, config);
             log.info("Enabling CopyOnRead support. Index files would be copied under {}", indexDir.getAbsolutePath());
-            return new IndexTracker(indexCopier);
+            return new IndexTracker(new DefaultIndexReaderFactory(mountInfoProvider, indexCopier));
         }
 
         return new IndexTracker();
@@ -428,6 +434,7 @@ public class LuceneIndexProviderService {
             //so switch the TCCL so that static initializer picks up the right
             //classloader
             initializeFactoryClassLoaders0(classLoader);
+            initializeClasses();
         } catch (Throwable t) {
             log.warn("Error occurred while initializing the Lucene " +
                     "Factories", t);
@@ -443,6 +450,15 @@ public class LuceneIndexProviderService {
         TokenizerFactory.reloadTokenizers(classLoader);
         CharFilterFactory.reloadCharFilters(classLoader);
         TokenFilterFactory.reloadTokenFilters(classLoader);
+    }
+
+    private void initializeClasses() {
+        // prevent LUCENE-6482
+        // (also done in IndexDefinition, just to be save)
+        OakCodec ensureLucene46CodecLoaded = new OakCodec();
+        // to ensure the JVM doesn't optimize away object creation
+        // (probably not really needed; just to be save)
+        log.debug("Lucene46Codec is loaded: {}", ensureLucene46CodecLoaded);
     }
 
     private void initializeExtractedTextCache(BundleContext bundleContext, Map<String, ?> config) {

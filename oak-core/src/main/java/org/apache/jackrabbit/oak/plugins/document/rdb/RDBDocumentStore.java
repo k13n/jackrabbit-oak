@@ -64,6 +64,7 @@ import javax.sql.DataSource;
 import com.google.common.base.Function;
 import com.google.common.base.Stopwatch;
 import org.apache.jackrabbit.oak.cache.CacheStats;
+import org.apache.jackrabbit.oak.cache.CacheValue;
 import org.apache.jackrabbit.oak.plugins.document.Collection;
 import org.apache.jackrabbit.oak.plugins.document.Document;
 import org.apache.jackrabbit.oak.plugins.document.DocumentMK;
@@ -119,7 +120,7 @@ import com.google.common.collect.Sets;
  * derived from an Oak path, and the value is a serialization of a
  * {@link Document} (or a part of one). Additional fields are used for queries,
  * debugging, and concurrency control:
- * <table style="text-align: left;">
+ * <table style="text-align: left;" summary="">
  * <thead>
  * <tr>
  * <th>Column</th>
@@ -492,16 +493,18 @@ public class RDBDocumentStore implements DocumentStore {
 
     @Override
     public CacheInvalidationStats invalidateCache() {
-        for (NodeDocument nd : nodesCache.values()) {
-            nd.markUpToDate(0);
+        for (CacheValue key : nodesCache.keys()) {
+            invalidateCache(Collection.NODES, key.toString());
         }
         return null;
     }
 
     @Override
     public CacheInvalidationStats invalidateCache(Iterable<String> keys) {
-        //TODO: optimize me
-        return invalidateCache();
+        for (String key : keys) {
+            invalidateCache(Collection.NODES, key);
+        }
+        return null;
     }
 
     @Override
@@ -521,6 +524,7 @@ public class RDBDocumentStore implements DocumentStore {
             if (remove) {
                 nodesCache.invalidate(id);
             } else {
+                nodesCache.markChanged(id);
                 NodeDocument entry = nodesCache.getIfPresent(id);
                 if (entry != null) {
                     entry.markUpToDate(0);
@@ -977,7 +981,7 @@ public class RDBDocumentStore implements DocumentStore {
         }
         String tableName = tmd.getName();
 
-        PreparedStatement checkStatement = null, checkStatement2 = null;
+        PreparedStatement checkStatement = null;
 
         ResultSet checkResultSet = null;
         Statement creatStatement = null;
@@ -1026,6 +1030,9 @@ public class RDBDocumentStore implements DocumentStore {
             // table does not appear to exist
             con.rollback();
 
+            PreparedStatement checkStatement2 = null;
+            ResultSet checkResultSet2 = null;
+
             try {
                 creatStatement = con.createStatement();
                 creatStatement.execute(this.dbInfo.getTableCreationStatement(tableName));
@@ -1043,9 +1050,9 @@ public class RDBDocumentStore implements DocumentStore {
 
                 checkStatement2 = con.prepareStatement("select * from " + tableName + " where ID = ?");
                 checkStatement2.setString(1, "0:/");
-                ResultSet rs = checkStatement2.executeQuery();
+                checkResultSet2 = checkStatement2.executeQuery();
                 // try to discover size of DATA column and binary-ness of ID
-                ResultSetMetaData met = rs.getMetaData();
+                ResultSetMetaData met = checkResultSet2.getMetaData();
                 obtainFlagsFromResultSetMeta(met, tmd);
 
                 if (col == Collection.NODES) {
@@ -1061,11 +1068,14 @@ public class RDBDocumentStore implements DocumentStore {
                 LOG.error("Failed to create table " + tableName + " in " + dbname, ex2);
                 throw ex2;
             }
+            finally {
+                closeResultSet(checkResultSet2);
+                closeStatement(checkStatement2);
+            }
         }
         finally {
             closeResultSet(checkResultSet);
             closeStatement(checkStatement);
-            closeStatement(checkStatement2);
             closeStatement(creatStatement);
         }
     }
@@ -1413,8 +1423,24 @@ public class RDBDocumentStore implements DocumentStore {
                     // already in the cache
                     doc = convertFromDBObject(collection, row);
                 } else {
-                    // otherwise mark it as fresh
-                    ((NodeDocument) doc).markUpToDate(now);
+                    // we got a document from the cache, thus collection is NODES
+                    // and a tracker is present
+                    long lastmodified = modifiedOf(doc);
+                    if (lastmodified == row.getModified() && lastmodified >= 1) {
+                        Lock lock = locks.acquire(row.getId());
+                        try {
+                            if (!tracker.mightBeenAffected(row.getId())) {
+                                // otherwise mark it as fresh
+                                ((NodeDocument) doc).markUpToDate(now);
+                            }
+                        } finally {
+                            lock.unlock();
+                        }
+                    }
+                    else {
+                        // we need a fresh document instance
+                        doc = convertFromDBObject(collection, row);
+                    }
                 }
                 result.add(doc);
             }
@@ -1453,18 +1479,19 @@ public class RDBDocumentStore implements DocumentStore {
         final Stopwatch watch = startWatch();
         boolean docFound = true;
         try {
-            long lastmodcount = -1;
+            long lastmodcount = -1, lastmodified = -1;
             if (cachedDoc != null) {
                 lastmodcount = modcountOf(cachedDoc);
+                lastmodified = modifiedOf(cachedDoc);
             }
             connection = this.ch.getROConnection();
-            RDBRow row = db.read(connection, tmd, id, lastmodcount);
+            RDBRow row = db.read(connection, tmd, id, lastmodcount, lastmodified);
             connection.commit();
             if (row == null) {
                 docFound = false;
                 return null;
             } else {
-                if (lastmodcount == row.getModcount()) {
+                if (lastmodcount == row.getModcount() && lastmodified == row.getModified() && lastmodified >= 1) {
                     // we can re-use the cached document
                     cachedDoc.markUpToDate(System.currentTimeMillis());
                     return castAsT(cachedDoc);
@@ -1797,6 +1824,11 @@ public class RDBDocumentStore implements DocumentStore {
     private static long modcountOf(@Nonnull Document doc) {
         Long n = doc.getModCount();
         return n != null ? n : -1;
+    }
+
+    private static long modifiedOf(@Nonnull Document doc) {
+        Object l = doc.get(NodeDocument.MODIFIED_IN_SECS);
+        return (l instanceof Long) ? ((Long)l).longValue() : -1;
     }
 
     @Nonnull

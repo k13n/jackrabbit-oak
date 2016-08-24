@@ -19,6 +19,7 @@
 
 package org.apache.jackrabbit.oak.segment.file;
 
+import static org.apache.jackrabbit.oak.segment.file.FileStoreBuilder.fileStoreBuilder;
 import static org.junit.Assume.assumeTrue;
 
 import java.io.File;
@@ -26,10 +27,8 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
 
-import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.segment.SegmentNodeStore;
 import org.apache.jackrabbit.oak.segment.SegmentNodeStoreBuilders;
 import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
@@ -62,7 +61,7 @@ public class SegmentReferenceLimitTestIT {
             .getBoolean(SegmentReferenceLimitTestIT.class.getSimpleName());
 
     @Rule
-    public TemporaryFolder folder = new TemporaryFolder();
+    public TemporaryFolder folder = new TemporaryFolder(new File("target"));
 
     private File getFileStoreFolder() {
         return folder.getRoot();
@@ -74,9 +73,14 @@ public class SegmentReferenceLimitTestIT {
     }
 
     @Test
-    public void corruption() throws IOException, CommitFailedException, ExecutionException, InterruptedException {
-        FileStore fileStore = FileStore.builder(getFileStoreFolder()).withMaxFileSize(1)
-                .withNoCache().withMemoryMapping(true).build();
+    public void corruption() throws Exception {
+        FileStore fileStore = fileStoreBuilder(getFileStoreFolder())
+                .withMaxFileSize(1)
+                .withSegmentCacheSize(0)
+                .withStringCacheSize(0)
+                .withTemplateCacheSize(0)
+                .withMemoryMapping(true)
+                .build();
         SegmentNodeStore nodeStore = SegmentNodeStoreBuilders.builder(fileStore).build();
 
         NodeBuilder root = nodeStore.getRoot().builder();

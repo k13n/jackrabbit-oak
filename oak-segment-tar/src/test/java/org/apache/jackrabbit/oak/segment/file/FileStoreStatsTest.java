@@ -20,6 +20,7 @@
 package org.apache.jackrabbit.oak.segment.file;
 
 import static com.google.common.base.Charsets.UTF_8;
+import static org.apache.jackrabbit.oak.segment.file.FileStoreBuilder.fileStoreBuilder;
 import static org.junit.Assert.assertEquals;
 import static org.mockito.Mockito.mock;
 
@@ -29,6 +30,11 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 
 import org.apache.jackrabbit.oak.commons.concurrent.ExecutorCloser;
+import org.apache.jackrabbit.oak.segment.SegmentNodeStore;
+import org.apache.jackrabbit.oak.segment.SegmentNodeStoreBuilders;
+import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
+import org.apache.jackrabbit.oak.spi.commit.EmptyHook;
+import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.oak.stats.DefaultStatisticsProvider;
 import org.apache.jackrabbit.oak.stats.StatisticsProvider;
 import org.junit.After;
@@ -38,7 +44,7 @@ import org.junit.rules.TemporaryFolder;
 
 public class FileStoreStatsTest {
     @Rule
-    public final TemporaryFolder segmentFolder = new TemporaryFolder();
+    public final TemporaryFolder segmentFolder = new TemporaryFolder(new File("target"));
 
     private final ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
 
@@ -67,11 +73,13 @@ public class FileStoreStatsTest {
     @Test
     public void tarWriterIntegration() throws Exception{
         StatisticsProvider statsProvider = new DefaultStatisticsProvider(executor);
-        FileStore store = FileStore.builder(segmentFolder.newFolder())
+        FileStore store = fileStoreBuilder(segmentFolder.newFolder())
                 .withStatisticsProvider(statsProvider)
                 .build();
+        
+        FileStoreStats stats = new FileStoreStats(statsProvider, store, 0);
+        
         try {
-            FileStoreStats stats = new FileStoreStats(statsProvider, store, 0);
             long initialSize = stats.getApproximateSize();
 
             UUID id = UUID.randomUUID();
@@ -85,9 +93,30 @@ public class FileStoreStatsTest {
             }
 
             assertEquals(stats.getApproximateSize() - initialSize, file.length());
+            
         } finally {
             store.close();
         }
+        
+        assertEquals(1, stats.getJournalWriteStatsAsCount());
     }
 
+    @Test
+    public void testJournalWriteStats() throws Exception {
+        StatisticsProvider statsProvider = new DefaultStatisticsProvider(executor);
+        FileStore fileStore = fileStoreBuilder(segmentFolder.newFolder()).withStatisticsProvider(statsProvider).build();
+        FileStoreStats stats = new FileStoreStats(statsProvider, fileStore, 0);
+
+        SegmentNodeStore nodeStore = SegmentNodeStoreBuilders.builder(fileStore).build();
+
+        for (int i = 0; i < 10; i++) {
+            NodeBuilder root = nodeStore.getRoot().builder();
+            root.setProperty("count", i);
+            nodeStore.merge(root, EmptyHook.INSTANCE, CommitInfo.EMPTY);
+
+            fileStore.flush();
+        }
+
+        assertEquals(10, stats.getJournalWriteStatsAsCount());
+    }
 }

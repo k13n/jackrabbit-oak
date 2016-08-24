@@ -96,32 +96,46 @@ public class NodeDocumentCache implements Closeable {
                 nodeDocumentsCache.invalidate(new StringValue(key));
             }
 
-            for (CacheChangesTracker tracker : changeTrackers) {
-                tracker.invalidateDocument(key);
-            }
+            internalMarkChanged(key);
         } finally {
             lock.unlock();
         }
     }
 
     /**
-     * Invalidate document with given keys iff their mod counts are different as
-     * passed in the map.
+     * Mark that the document with the given key is being changed.
      *
-     * @param modCounts map where key is the document id and the value is the mod count
+     * @param key to mark
+     */
+    public void markChanged(@Nonnull String key) {
+        Lock lock = locks.acquire(key);
+        try {
+            internalMarkChanged(key);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Invalidate document with given keys iff their modification stamps are
+     * different as passed in the map.
+     *
+     * @param modStamps map where key is the document id and the value is the
+     *                  modification stamps.
      * @return number of invalidated entries
      */
     @Nonnegative
-    public int invalidateOutdated(@Nonnull Map<String, Long> modCounts) {
+    public int invalidateOutdated(@Nonnull Map<String, ModificationStamp> modStamps) {
         int invalidatedCount = 0;
-        for (Entry<String, Long> e : modCounts.entrySet()) {
+        for (Entry<String, ModificationStamp> e : modStamps.entrySet()) {
             String id = e.getKey();
-            Long modCount = e.getValue();
+            ModificationStamp stamp = e.getValue();
             NodeDocument doc = getIfPresent(id);
             if (doc == null) {
                 continue;
             }
-            if (!Objects.equal(modCount, doc.getModCount())) {
+            if (!Objects.equal(stamp.modCount, doc.getModCount())
+                    || !Objects.equal(stamp.modified, doc.getModified())) {
                 invalidate(id);
                 invalidatedCount++;
             }
@@ -443,6 +457,17 @@ public class NodeDocumentCache implements Closeable {
     }
 
     //----------------------------< internal >----------------------------------
+
+    /**
+     * Marks the document as potentially changed.
+     * 
+     * @param key the document to be marked
+     */
+    private void internalMarkChanged(String key) {
+        for (CacheChangesTracker tracker : changeTrackers) {
+            tracker.invalidateDocument(key);
+        }
+    }
 
     /**
      * Puts a document into the cache without acquiring a lock.

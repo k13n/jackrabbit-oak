@@ -20,6 +20,7 @@ import static org.apache.jackrabbit.oak.query.ast.AstElementFactory.copyElementA
 import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -932,6 +933,9 @@ public class QueryImpl implements Query {
         for (int i = 0; i < list.length; i++) {
             list[i] = selectors.get(i).getSelectorName();
         }
+        // reverse names to that for xpath, 
+        // the first selector is the same as the node iterator
+        Collections.reverse(Arrays.asList(list));
         return list;
     }
 
@@ -1022,11 +1026,12 @@ public class QueryImpl implements Query {
                     double c = p.getCostPerExecution() + entryCount * p.getCostPerEntry();
                     if (c < cost) {
                         cost = c;
-                        if (p.getPlanName() != null) {
-                            indexName += "[" + p.getPlanName() + "]";
-                        }
                         indexPlan = p;
                     }
+                }
+
+                if (indexPlan != null && indexPlan.getPlanName() != null) {
+                    indexName += "[" + indexPlan.getPlanName() + "]";
                 }
             } else {
                 cost = index.getCost(filter, rootState);

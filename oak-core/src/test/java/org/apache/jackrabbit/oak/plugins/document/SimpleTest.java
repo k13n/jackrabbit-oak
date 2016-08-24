@@ -16,13 +16,17 @@
  */
 package org.apache.jackrabbit.oak.plugins.document;
 
+import static org.hamcrest.CoreMatchers.anyOf;
+import static org.hamcrest.CoreMatchers.equalTo;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
+import java.util.Collections;
 import java.util.Random;
 
 import org.apache.jackrabbit.oak.api.PropertyState;
@@ -76,8 +80,8 @@ public class SimpleTest {
         DocumentStore s = mk.getDocumentStore();
         DocumentNodeStore ns = mk.getNodeStore();
         RevisionVector rev = RevisionVector.fromString(mk.getHeadRevision());
-        DocumentNodeState n = new DocumentNodeState(ns, "/test", rev);
-        n.setProperty("name", "\"Hello\"");
+        DocumentNodeState n = new DocumentNodeState(ns, "/test", rev,
+                Collections.singleton(ns.createPropertyState("name", "\"Hello\"")), false, null);
         UpdateOp op = n.asOperation(rev.getRevision(ns.getClusterId()));
         // mark as commit root
         NodeDocument.setRevision(op, rev.getRevision(ns.getClusterId()), "c");
@@ -162,7 +166,7 @@ public class SimpleTest {
         String diff23 = mk.diff(rev2, rev3, "/", 0).trim();
         assertEquals("+\"/t3\":{}", diff23);
         String diff13 = mk.diff(rev1, rev3, "/", 0).trim();
-        assertEquals("+\"/t2\":{}+\"/t3\":{}", diff13);
+        assertThat(diff13, anyOf(equalTo("+\"/t2\":{}+\"/t3\":{}"), equalTo("+\"/t3\":{}+\"/t2\":{}")));
         String diff34 = mk.diff(rev3, rev4, "/", 0).trim();
         assertEquals("^\"/t3\":{}", diff34);
     }

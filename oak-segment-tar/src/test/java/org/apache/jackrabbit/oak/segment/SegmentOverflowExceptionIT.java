@@ -20,6 +20,7 @@
 package org.apache.jackrabbit.oak.segment;
 
 import static org.apache.commons.lang.RandomStringUtils.randomAlphabetic;
+import static org.apache.jackrabbit.oak.segment.file.FileStoreBuilder.fileStoreBuilder;
 import static org.junit.Assume.assumeTrue;
 
 import java.io.ByteArrayInputStream;
@@ -66,7 +67,7 @@ public class SegmentOverflowExceptionIT {
     private final Random rnd = new Random();
 
     @Rule
-    public TemporaryFolder folder = new TemporaryFolder();
+    public TemporaryFolder folder = new TemporaryFolder(new File("target"));
 
     private File getFileStoreFolder() {
         return folder.getRoot();
@@ -92,8 +93,8 @@ public class SegmentOverflowExceptionIT {
     };
 
     @Test
-    public void run() throws IOException, CommitFailedException, InterruptedException {
-        FileStore fileStore = FileStore.builder(getFileStoreFolder()).withGCMonitor(gcMonitor).build();
+    public void run() throws Exception {
+        FileStore fileStore = fileStoreBuilder(getFileStoreFolder()).withGCMonitor(gcMonitor).build();
         try {
             final SegmentNodeStore nodeStore = SegmentNodeStoreBuilders.builder(fileStore).build();
             long start = System.currentTimeMillis();

@@ -22,11 +22,10 @@ import static com.google.common.collect.Sets.newHashSet;
 
 import java.security.SecureRandom;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.annotation.Nonnull;
-
-import com.google.common.base.Predicate;
 
 /**
  * Tracker of references to segment identifiers and segment instances
@@ -68,9 +67,9 @@ public class SegmentTracker {
     @Nonnull
     private final AtomicInteger segmentCounter = new AtomicInteger();
 
-    public SegmentTracker(@Nonnull SegmentStore store) {
+    public SegmentTracker() {
         for (int i = 0; i < tables.length; i++) {
-            tables[i] = new SegmentIdTable(store);
+            tables[i] = new SegmentIdTable();
         }
     }
 
@@ -96,52 +95,53 @@ public class SegmentTracker {
     }
 
     /**
-     * Get an existing {@code SegmentId} with the given {@code msb} and {@code lsb}
-     * or create a new one if no such id exists with this tracker.
-     * @param msb  most significant bits of the segment id
-     * @param lsb  least  significant bits of the segment id
+     * Get an existing {@code SegmentId} with the given {@code msb} and {@code
+     * lsb} or create a new one if no such id exists with this tracker.
+     *
+     * @param msb   most significant bits of the segment id
+     * @param lsb   least  significant bits of the segment id
+     * @param maker A non-{@code null} instance of {@link SegmentIdFactory}.
      * @return the segment id
      */
     @Nonnull
-    public SegmentId getSegmentId(long msb, long lsb) {
+    public SegmentId newSegmentId(long msb, long lsb, SegmentIdFactory maker) {
         int index = ((int) msb) & (tables.length - 1);
-        return tables[index].getSegmentId(msb, lsb);
+        return tables[index].newSegmentId(msb, lsb, maker);
     }
 
     /**
      * Create and track a new segment id for data segments.
+     *
+     * @param maker A non-{@code null} instance of {@link SegmentIdFactory}.
      * @return the segment id
      */
     @Nonnull
-    SegmentId newDataSegmentId() {
-        return newSegmentId(DATA);
+    public SegmentId newDataSegmentId(SegmentIdFactory maker) {
+        return newSegmentId(DATA, maker);
     }
 
     /**
      * Create and track a new segment id for bulk segments.
+     *
+     * @param maker A non-{@code null} instance of {@link SegmentIdFactory}.
      * @return the segment id
      */
     @Nonnull
-    SegmentId newBulkSegmentId() {
-        return newSegmentId(BULK);
+    public SegmentId newBulkSegmentId(SegmentIdFactory maker) {
+        return newSegmentId(BULK, maker);
     }
 
     @Nonnull
-    private SegmentId newSegmentId(long type) {
+    private SegmentId newSegmentId(long type, SegmentIdFactory maker) {
         segmentCounter.incrementAndGet();
         long msb = (random.nextLong() & MSB_MASK) | VERSION;
         long lsb = (random.nextLong() & LSB_MASK) | type;
-        return getSegmentId(msb, lsb);
+        return newSegmentId(msb, lsb, maker);
     }
 
-    // FIXME OAK-4285: Align cleanup of segment id tables with the new cleanup strategy
-    // ith clean brutal we need to remove those ids that have been cleaned
-    // i.e. those whose segment was from an old generation
-    // Instead of removing, mark affected ids as gc'ed so the SNFE caused by
-    // any subsequent access can report a precise cause
-    public synchronized void clearSegmentIdTables(Predicate<SegmentId> canRemove) {
+    public synchronized void clearSegmentIdTables(@Nonnull Set<UUID> reclaimed, @Nonnull String gcInfo) {
         for (SegmentIdTable table : tables) {
-            table.clearSegmentIdTables(canRemove);
+            table.clearSegmentIdTables(reclaimed, gcInfo);
         }
     }
 

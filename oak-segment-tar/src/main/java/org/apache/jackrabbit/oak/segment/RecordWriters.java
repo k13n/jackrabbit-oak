@@ -399,7 +399,6 @@ final class RecordWriters {
             // This allows the code to take apart small from a large blob IDs.
             writer.writeByte((byte) 0xF0);
             writer.writeRecordId(stringRecord);
-            writer.addBlobRef(id);
             return id;
         }
     }
@@ -426,7 +425,6 @@ final class RecordWriters {
             int length = blobId.length;
             writer.writeShort((short) (length | 0xE000));
             writer.writeBytes(blobId, 0, length);
-            writer.addBlobRef(id);
             return id;
         }
     }
@@ -496,8 +494,16 @@ final class RecordWriters {
 
         @Override
         protected RecordId writeRecordContent(RecordId id, SegmentBufferWriter writer) {
+
+            // Write the stable record ID. If no stable ID exists (in case of a
+            // new node state), it is generated from the current record ID. In
+            // this case, the generated stable ID is only a marker and is not a
+            // reference to another record.
+
             if (stableId == null) {
-                writer.writeRecordId(id);
+                // Write this node's record id to indicate that the stable id is not
+                // explicitly stored.
+                writer.writeRecordId(id, false);
             } else {
                 writer.writeRecordId(stableId);
             }

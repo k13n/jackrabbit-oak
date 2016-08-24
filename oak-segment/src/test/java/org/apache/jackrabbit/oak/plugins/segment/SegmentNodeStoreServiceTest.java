@@ -25,10 +25,13 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.mockito.Mockito.mock;
 
+import java.io.File;
 import java.util.Map;
 
 import org.apache.jackrabbit.oak.spi.blob.BlobStore;
+import org.apache.jackrabbit.oak.spi.blob.MemoryBlobStore;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
+import org.apache.jackrabbit.oak.spi.state.NodeStoreProvider;
 import org.apache.jackrabbit.oak.stats.StatisticsProvider;
 import org.apache.sling.testing.mock.osgi.junit.OsgiContext;
 import org.junit.Before;
@@ -43,7 +46,7 @@ public class SegmentNodeStoreServiceTest {
     public OsgiContext context = new OsgiContext();
 
     @Rule
-    public TemporaryFolder folder = new TemporaryFolder();
+    public TemporaryFolder folder = new TemporaryFolder(new File("target"));
 
     @Before
     public void setUp(){
@@ -137,6 +140,18 @@ public class SegmentNodeStoreServiceTest {
         assertServiceNotActivated();
 
         unregisterSegmentNodeStoreService();
+    }
+
+    @Test
+    public void nodeStoreProvider() throws Exception{
+        Map<String, Object> properties = newHashMap();
+        properties.put(SegmentNodeStoreService.SECONDARY_STORE, true);
+        properties.put(SegmentNodeStoreService.DIRECTORY, folder.getRoot().getAbsolutePath());
+        context.registerService(BlobStore.class, new MemoryBlobStore());
+
+        segmentNodeStoreService = context.registerInjectActivateService(new SegmentNodeStoreService(), properties);
+        assertNull(context.getService(NodeStore.class));
+        assertNotNull(context.getService(NodeStoreProvider.class));
     }
 
     private SegmentNodeStoreService segmentNodeStoreService;

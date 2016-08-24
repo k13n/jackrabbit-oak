@@ -22,6 +22,7 @@ import static org.apache.jackrabbit.oak.api.CommitFailedException.MERGE;
 import static org.apache.jackrabbit.oak.api.CommitFailedException.OAK;
 import static org.apache.jackrabbit.oak.api.CommitFailedException.STATE;
 import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.COLLISIONS;
+import static org.apache.jackrabbit.oak.plugins.document.util.CountingDiff.countChanges;
 
 import java.util.HashSet;
 import java.util.Random;
@@ -155,6 +156,7 @@ class DocumentNodeStoreBranch implements NodeStoreBranch {
         Set<Revision> conflictRevisions = new HashSet<Revision>();
         long time = System.currentTimeMillis();
         int numRetries = 0;
+        boolean suspended= false;
         for (long backoff = MIN_BACKOFF; backoff <= maximumBackoff; backoff *= 2) {
             if (ex != null) {
                 try {
@@ -166,6 +168,7 @@ class DocumentNodeStoreBranch implements NodeStoreBranch {
                         // suspend until conflicting revision is visible
                         LOG.debug("Suspending until {} is visible. Current head {}.",
                                 conflictRevisions, store.getHeadRevision());
+                        suspended = true;
                         store.suspendUntilAll(conflictRevisions);
                         conflictRevisions.clear();
                         LOG.debug("Resumed. Current head {}.", store.getHeadRevision());
@@ -179,8 +182,10 @@ class DocumentNodeStoreBranch implements NodeStoreBranch {
                 }
             }
             try {
-                return branchState.merge(checkNotNull(hook),
+                NodeState result = branchState.merge(checkNotNull(hook),
                         checkNotNull(info), exclusive);
+                store.getStatsCollector().doneMerge(numRetries, System.currentTimeMillis() - time, suspended, exclusive);
+                return result;
             } catch (FailedWithConflictException e) {
                 ex = e;
                 conflictRevisions.addAll(e.getConflictRevisions());
@@ -198,6 +203,7 @@ class DocumentNodeStoreBranch implements NodeStoreBranch {
         }
         // if we get here retrying failed
         time = System.currentTimeMillis() - time;
+        store.getStatsCollector().failedMerge(numRetries, time, suspended, exclusive);
         String msg = ex.getMessage() + " (retries " + numRetries + ", " + time + " ms)";
         throw new CommitFailedException(ex.getSource(), ex.getType(),
                 ex.getCode(), msg, ex.getCause());
@@ -280,7 +286,7 @@ class DocumentNodeStoreBranch implements NodeStoreBranch {
             DocumentNodeState base,
             CommitInfo info) {
         boolean success = false;
-        Commit c = store.newCommit(base.getRevision(), this);
+        Commit c = store.newCommit(base.getRootRevision(), this);
         RevisionVector rev;
         try {
             op.with(c);
@@ -290,7 +296,7 @@ class DocumentNodeStoreBranch implements NodeStoreBranch {
                 return base;
             }
             c.apply();
-            rev = store.done(c, base.getRevision().isBranch(), info);
+            rev = store.done(c, base.getRootRevision().isBranch(), info);
             success = true;
         } finally {
             if (!success) {
@@ -439,14 +445,18 @@ class DocumentNodeStoreBranch implements NodeStoreBranch {
      * Transitions to:
      * <ul>
      *     <li>{@link Unmodified} on {@link #setRoot(NodeState)} if the new root is the same
-     *         as the base of this branch or
-     *     <li>{@link Persisted} otherwise.
+     *         as the base of this branch</li>
+     *     <li>{@link Persisted} on {@link #setRoot(NodeState)} if the number of
+     *         changes counted from the base to the new root reaches
+     *         {@link DocumentRootBuilder#UPDATE_LIMIT}.</li>
      *     <li>{@link Merged} on {@link BranchState#merge(CommitHook, CommitInfo, boolean)}</li>
      * </ul>
      */
     private class InMemory extends BranchState {
         /** Root state of the transient head. */
         private NodeState head;
+        /** Number of in-memory updates */
+        private int numUpdates;
 
         @Override
         public String toString() {
@@ -456,6 +466,7 @@ class DocumentNodeStoreBranch implements NodeStoreBranch {
         InMemory(DocumentNodeState base, NodeState head) {
             super(base);
             this.head = head;
+            this.numUpdates = countChanges(base, head);
         }
 
         @Override
@@ -469,8 +480,11 @@ class DocumentNodeStoreBranch implements NodeStoreBranch {
             if (base.equals(root)) {
                 branchState = new Unmodified(base);
             } else if (!head.equals(root)) {
+                numUpdates += countChanges(head, root);
                 head = root;
-                persist();
+                if (numUpdates > DocumentRootBuilder.UPDATE_LIMIT) {
+                    persist();
+                }
             }
         }
 
@@ -547,7 +561,7 @@ class DocumentNodeStoreBranch implements NodeStoreBranch {
          * @return the branch state.
          */
         final DocumentNodeState createBranch(DocumentNodeState state) {
-            return store.getRoot(state.getRevision().asBranchRevision(store.getClusterId()));
+            return store.getRoot(state.getRootRevision().asBranchRevision(store.getClusterId()));
         }
 
         @Override
@@ -567,7 +581,7 @@ class DocumentNodeStoreBranch implements NodeStoreBranch {
         void rebase() {
             DocumentNodeState root = store.getRoot();
             // perform rebase in store
-            head = store.getRoot(store.rebase(head.getRevision(), root.getRevision()));
+            head = store.getRoot(store.rebase(head.getRootRevision(), root.getRootRevision()));
             base = root;
         }
 
@@ -589,7 +603,7 @@ class DocumentNodeStoreBranch implements NodeStoreBranch {
                         checkForConflicts();
                         NodeState toCommit = checkNotNull(hook).processCommit(base, head, info);
                         head = DocumentNodeStoreBranch.this.persist(toCommit, head, info);
-                        return store.getRoot(store.merge(head.getRevision(), info));
+                        return store.getRoot(store.merge(head.getRootRevision(), info));
                     }
                 });
                 branchState = new Merged(base);
@@ -619,8 +633,8 @@ class DocumentNodeStoreBranch implements NodeStoreBranch {
         private void resetBranch(DocumentNodeState branchHead, DocumentNodeState ancestor) {
             try {
                 head = store.getRoot(
-                        store.reset(branchHead.getRevision(), 
-                                ancestor.getRevision()));
+                        store.reset(branchHead.getRootRevision(),
+                                ancestor.getRootRevision()));
             } catch (Exception e) {
                 CommitFailedException ex = new CommitFailedException(
                         OAK, 100, "Branch reset failed", e);
@@ -636,7 +650,7 @@ class DocumentNodeStoreBranch implements NodeStoreBranch {
          *          of the commits on this branch.
          */
         private void checkForConflicts() throws CommitFailedException {
-            Branch b = store.getBranches().getBranch(head.getRevision());
+            Branch b = store.getBranches().getBranch(head.getRootRevision());
             if (b == null) {
                 return;
             }

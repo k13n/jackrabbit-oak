@@ -18,14 +18,12 @@
  */
 package org.apache.jackrabbit.oak.segment;
 
-import static org.apache.jackrabbit.oak.commons.FixturesHelper.Fixture.SEGMENT_MK;
-import static org.apache.jackrabbit.oak.commons.FixturesHelper.getFixtures;
-import static org.apache.jackrabbit.oak.segment.compaction.SegmentGCOptions.DEFAULT;
+import static org.apache.jackrabbit.oak.segment.compaction.SegmentGCOptions.defaultGCOptions;
+import static org.apache.jackrabbit.oak.segment.file.FileStoreBuilder.fileStoreBuilder;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
-import static org.junit.Assume.assumeTrue;
 
 import java.io.ByteArrayInputStream;
 import java.io.File;
@@ -33,11 +31,12 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.List;
 import java.util.Random;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 
 import javax.annotation.Nonnull;
 
 import com.google.common.collect.Lists;
-
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.IOUtils;
 import org.apache.jackrabbit.core.data.FileDataStore;
@@ -55,8 +54,8 @@ import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
 import org.apache.jackrabbit.oak.spi.commit.EmptyHook;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
+import org.apache.jackrabbit.oak.stats.DefaultStatisticsProvider;
 import org.junit.After;
-import org.junit.BeforeClass;
 import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
@@ -69,14 +68,10 @@ public class ExternalBlobIT {
     private FileBlob fileBlob;
 
     @Rule
-    public TemporaryFolder folder = new TemporaryFolder();
+    public TemporaryFolder folder = new TemporaryFolder(new File("target"));
 
-    @BeforeClass
-    public static void assumptions() {
-        assumeTrue(getFixtures().contains(SEGMENT_MK));
-    }
-    
-    @Test @Ignore("would need a FileBlobStore for this")
+    @Test
+    @Ignore("would need a FileBlobStore for this")
     public void testFileBlob() throws Exception {
         nodeStore = getNodeStore(new TestBlobStore());
         testCreateAndRead(getFileBlob());
@@ -165,10 +160,14 @@ public class ExternalBlobIT {
         nodeStore = null;
     }
 
-    protected SegmentNodeStore getNodeStore(BlobStore blobStore) throws IOException {
+    protected SegmentNodeStore getNodeStore(BlobStore blobStore) throws Exception {
         if (nodeStore == null) {
-            store = FileStore.builder(getWorkDir()).withBlobStore(blobStore)
-                    .withMaxFileSize(1).build();
+            ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
+            
+            store = fileStoreBuilder(getWorkDir()).withBlobStore(blobStore)
+                    .withMaxFileSize(1)
+                    .withStatisticsProvider(new DefaultStatisticsProvider(executor))
+                    .build();
             nodeStore = SegmentNodeStoreBuilders.builder(store).build();
         }
         return nodeStore;
@@ -279,13 +278,13 @@ public class ExternalBlobIT {
         store.flush();
 
         // blob went to the external store
-        assertTrue(store.size() < 10 * 1024);
+        assertTrue(store.getStats().getApproximateSize() < 10 * 1024);
         close();
 
-        SegmentGCOptions gcOptions = DEFAULT.setOffline();
-        store = FileStore.builder(getWorkDir()).withMaxFileSize(1)
+        SegmentGCOptions gcOptions = defaultGCOptions().setOffline();
+        store = fileStoreBuilder(getWorkDir()).withMaxFileSize(1)
                 .withGCOptions(gcOptions).build();
-        assertTrue(store.size() < 10 * 1024);
+        assertTrue(store.getStats().getApproximateSize() < 10 * 1024);
 
         store.compact();
         store.cleanup();

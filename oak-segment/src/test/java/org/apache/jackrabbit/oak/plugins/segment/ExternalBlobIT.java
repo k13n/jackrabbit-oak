@@ -64,7 +64,7 @@ public class ExternalBlobIT {
     private FileBlob fileBlob;
 
     @Rule
-    public TemporaryFolder folder = new TemporaryFolder();
+    public TemporaryFolder folder = new TemporaryFolder(new File("target"));
 
     @BeforeClass
     public static void assumptions() {
@@ -159,7 +159,7 @@ public class ExternalBlobIT {
         }
     }
 
-    protected SegmentNodeStore getNodeStore(BlobStore blobStore) throws IOException {
+    protected SegmentNodeStore getNodeStore(BlobStore blobStore) throws Exception {
         if (nodeStore == null) {
             store = FileStore.builder(getWorkDir()).withBlobStore(blobStore).withMaxFileSize(256).withMemoryMapping(false).build();
             nodeStore = SegmentNodeStore.builder(store).build();

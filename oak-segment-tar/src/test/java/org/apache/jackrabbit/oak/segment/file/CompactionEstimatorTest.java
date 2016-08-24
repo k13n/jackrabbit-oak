@@ -19,6 +19,7 @@
 
 package org.apache.jackrabbit.oak.segment.file;
 
+import static org.apache.jackrabbit.oak.segment.file.FileStoreBuilder.fileStoreBuilder;
 import static org.junit.Assert.assertTrue;
 
 import java.io.ByteArrayInputStream;
@@ -41,7 +42,7 @@ import org.junit.rules.TemporaryFolder;
 public class CompactionEstimatorTest {
 
     @Rule
-    public TemporaryFolder folder = new TemporaryFolder();
+    public TemporaryFolder folder = new TemporaryFolder(new File("target"));
 
     private File getFileStoreFolder() {
         return folder.getRoot();
@@ -52,7 +53,7 @@ public class CompactionEstimatorTest {
         final int MB = 1024 * 1024;
         final int blobSize = 2 * MB;
 
-        FileStore fileStore = FileStore.builder(getFileStoreFolder()).withMaxFileSize(2).withMemoryMapping(false).build();
+        FileStore fileStore = fileStoreBuilder(getFileStoreFolder()).withMaxFileSize(2).withMemoryMapping(false).build();
         SegmentNodeStore nodeStore = SegmentNodeStoreBuilders.builder(fileStore).build();
 
         // 1. Create some blob properties
@@ -79,9 +80,14 @@ public class CompactionEstimatorTest {
 
         fileStore.flush();
         try {
-            // should be at 66%
-            assertTrue(fileStore.estimateCompactionGain(Suppliers.ofInstance(false))
-                    .estimateCompactionGain() > 60);
+            GCEstimation est = fileStore.estimateCompactionGain(Suppliers
+                    .ofInstance(false));
+            assertTrue(est.gcNeeded());
+            if (est instanceof CompactionGainEstimate) {
+                // should be at 66%
+                assertTrue(((CompactionGainEstimate) est)
+                        .estimateCompactionGain() > 60);
+            }
         } finally {
             fileStore.close();
         }

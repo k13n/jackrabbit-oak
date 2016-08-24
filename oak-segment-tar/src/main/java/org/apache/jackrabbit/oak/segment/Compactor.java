@@ -22,6 +22,7 @@ import static org.apache.jackrabbit.oak.api.Type.BINARIES;
 import static org.apache.jackrabbit.oak.api.Type.BINARY;
 import static org.apache.jackrabbit.oak.commons.PathUtils.concat;
 import static org.apache.jackrabbit.oak.plugins.memory.EmptyNodeState.EMPTY_NODE;
+import static org.apache.jackrabbit.oak.segment.RecordCache.newRecordCache;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -36,6 +37,7 @@ import org.apache.jackrabbit.oak.commons.IOUtils;
 import org.apache.jackrabbit.oak.plugins.memory.BinaryPropertyState;
 import org.apache.jackrabbit.oak.plugins.memory.MultiBinaryPropertyState;
 import org.apache.jackrabbit.oak.plugins.memory.PropertyStates;
+import org.apache.jackrabbit.oak.segment.compaction.SegmentGCOptions;
 import org.apache.jackrabbit.oak.spi.blob.BlobStore;
 import org.apache.jackrabbit.oak.spi.state.ApplyDiff;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
@@ -55,6 +57,14 @@ public class Compactor {
     /** Logger instance */
     private static final Logger log = LoggerFactory.getLogger(Compactor.class);
 
+    private static boolean eagerFlush = Boolean.getBoolean("oak.compaction.eagerFlush");
+
+    static {
+        if (eagerFlush) {
+            log.debug("Eager flush enabled.");
+        }
+    }
+
     private final SegmentReader reader;
 
     private final BlobStore blobStore;
@@ -68,6 +78,17 @@ public class Compactor {
     private final Predicate<NodeState> includeInMap = new OfflineCompactionPredicate();
 
     private final ProgressTracker progress = new ProgressTracker();
+
+    /**
+     * Enables content based de-duplication of binaries. Involves a fair amount
+     * of I/O when reading/comparing potentially equal blobs.
+     */
+    private final boolean binaryDedup;
+
+    /**
+     * Set the upper bound for the content based de-duplication checks.
+     */
+    private final long binaryDedupMaxSize;
 
     /**
      * Map from {@link #getBlobKey(Blob) blob keys} to matching compacted blob
@@ -105,15 +126,16 @@ public class Compactor {
         }
     }
 
-    private final RecordCache<RecordId> cache = RecordCache.<RecordId> factory(
-            cacheSize).get();
+    private final RecordCache<RecordId> cache = newRecordCache(cacheSize);
 
     public Compactor(SegmentReader reader, SegmentWriter writer,
-            BlobStore blobStore, Supplier<Boolean> cancel) {
+            BlobStore blobStore, Supplier<Boolean> cancel, SegmentGCOptions gc) {
         this.reader = reader;
         this.writer = writer;
         this.blobStore = blobStore;
         this.cancel = cancel;
+        this.binaryDedup = gc.isBinaryDeduplication();
+        this.binaryDedupMaxSize = gc.getBinaryDeduplicationMaxSize();
     }
 
     private SegmentNodeBuilder process(NodeState before, NodeState after,
@@ -220,7 +242,12 @@ public class Compactor {
 
             progress.onNode();
             try {
-                NodeBuilder child = EMPTY_NODE.builder();
+                NodeBuilder child;
+                if (eagerFlush) {
+                    child = builder.setChildNode(name);
+                } else {
+                    child = EMPTY_NODE.builder();
+                }
                 boolean success = new CompactDiff(child, path, name).diff(
                         EMPTY_NODE, after);
                 if (success) {
@@ -311,6 +338,8 @@ public class Compactor {
             try {
                 // Check if we've already cloned this specific record
                 RecordId id = sb.getRecordId();
+
+                // TODO verify binary impact on cache
                 RecordId compactedId = cache.get(id);
                 if (compactedId != null) {
                     return new SegmentBlob(blobStore, compactedId);
@@ -331,27 +360,37 @@ public class Compactor {
                     return clone;
                 }
 
-                // alternatively look if the exact same binary has been cloned
-                String key = getBlobKey(blob);
-                List<RecordId> ids = binaries.get(key);
-                if (ids != null) {
-                    for (RecordId duplicateId : ids) {
-                        if (new SegmentBlob(blobStore, duplicateId).equals(sb)) {
-                            cache.put(id, duplicateId);
-                            return new SegmentBlob(blobStore, duplicateId);
+                List<RecordId> ids = null;
+                String key = null;
+                boolean dedup = binaryDedup
+                        && blob.length() <= binaryDedupMaxSize;
+                if (dedup) {
+                    // alternatively look if the exact same binary has been
+                    // cloned
+                    key = getBlobKey(blob);
+                    ids = binaries.get(key);
+                    if (ids != null) {
+                        for (RecordId duplicateId : ids) {
+                            if (new SegmentBlob(blobStore, duplicateId)
+                                    .equals(sb)) {
+                                cache.put(id, duplicateId);
+                                return new SegmentBlob(blobStore, duplicateId);
+                            }
                         }
                     }
                 }
 
                 // if not, clone the large blob and keep track of the result
                 sb = writer.writeBlob(blob);
-
                 cache.put(id, sb.getRecordId());
-                if (ids == null) {
-                    ids = newArrayList();
-                    binaries.put(key, ids);
+
+                if (dedup) {
+                    if (ids == null) {
+                        ids = newArrayList();
+                        binaries.put(key, ids);
+                    }
+                    ids.add(sb.getRecordId());
                 }
-                ids.add(sb.getRecordId());
 
                 return sb;
             } catch (IOException e) {

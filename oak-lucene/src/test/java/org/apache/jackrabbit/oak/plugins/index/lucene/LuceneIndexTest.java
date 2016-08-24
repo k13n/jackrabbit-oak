@@ -46,13 +46,13 @@ import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstant
 import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.PERSISTENCE_FILE;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.PERSISTENCE_NAME;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants.PERSISTENCE_PATH;
-import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexEditorContext.getIndexWriterConfig;
-import static org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexEditorContext.newIndexDirectory;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.TestUtil.NT_TEST;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.TestUtil.createNodeWithType;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.TestUtil.newLuceneIndexDefinitionV2;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.util.LuceneIndexHelper.newLuceneIndexDefinition;
 import static org.apache.jackrabbit.oak.plugins.index.lucene.util.LuceneIndexHelper.newLucenePropertyIndexDefinition;
+import static org.apache.jackrabbit.oak.plugins.index.lucene.writer.IndexWriterUtils.getIndexWriterConfig;
+import static org.apache.jackrabbit.oak.plugins.index.lucene.writer.IndexWriterUtils.newIndexDirectory;
 import static org.apache.jackrabbit.oak.plugins.memory.PropertyStates.createProperty;
 import static org.apache.jackrabbit.oak.plugins.nodetype.write.InitialContent.INITIAL_CONTENT;
 
@@ -76,6 +76,7 @@ import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.plugins.index.IndexConstants;
 import org.apache.jackrabbit.oak.plugins.index.IndexUpdateProvider;
+import org.apache.jackrabbit.oak.plugins.index.lucene.directory.LocalIndexDir;
 import org.apache.jackrabbit.oak.plugins.index.lucene.score.ScorerProvider;
 import org.apache.jackrabbit.oak.plugins.index.lucene.score.ScorerProviderFactory;
 import org.apache.jackrabbit.oak.plugins.memory.ArrayBasedBlob;
@@ -371,13 +372,13 @@ public class LuceneIndexTest {
     }
 
     private void purgeDeletedDocs(NodeBuilder idx, IndexDefinition definition) throws IOException {
-        IndexWriter writer = new IndexWriter(newIndexDirectory(definition, idx), getIndexWriterConfig(definition, true));
+        IndexWriter writer = new IndexWriter(newIndexDirectory(definition, idx, LuceneIndexConstants.INDEX_DATA_CHILD_NAME), getIndexWriterConfig(definition, true));
         writer.forceMergeDeletes();
         writer.close();
     }
 
     public int getDeletedDocCount(NodeBuilder idx, IndexDefinition definition) throws IOException {
-        IndexReader reader = DirectoryReader.open(newIndexDirectory(definition, idx));
+        IndexReader reader = DirectoryReader.open(newIndexDirectory(definition, idx, LuceneIndexConstants.INDEX_DATA_CHILD_NAME));
         int numDeletes = reader.numDeletedDocs();
         reader.close();
         return numDeletes;
@@ -769,7 +770,9 @@ public class LuceneIndexTest {
     @Test
     public void luceneWithCopyOnReadDirAndReindex() throws Exception{
         NodeBuilder index = builder.child(INDEX_DEFINITIONS_NAME);
-        newLucenePropertyIndexDefinition(index, "lucene", ImmutableSet.of("foo", "foo2", "foo3"), null);
+        NodeBuilder defnState =
+                newLucenePropertyIndexDefinition(index, "lucene", ImmutableSet.of("foo", "foo2", "foo3"), null);
+        IndexDefinition definition = new IndexDefinition(root, defnState.getNodeState());
 
         //1. Create index in two increments
         NodeState before = builder.getNodeState();
@@ -798,10 +801,12 @@ public class LuceneIndexTest {
         indexed = HOOK.processCommit(indexed, builder.getNodeState(),CommitInfo.EMPTY);
         tracker.update(indexed);
 
+        defnState = builder.child(INDEX_DEFINITIONS_NAME).child("lucene");
+        definition = new IndexDefinition(root, defnState.getNodeState());
         assertQuery(tracker, indexed, "foo2", "bar2");
         //If reindex case handled properly then invalid count should be zero
         assertEquals(0, copier.getInvalidFileCount());
-        assertEquals(2, copier.getIndexDir("/oak:index/lucene").listFiles().length);
+        assertEquals(2, copier.getIndexRootDirectory().getLocalIndexes("/oak:index/lucene").size());
 
         //3. Update again. Now with close of previous reader
         //orphaned directory must be removed
@@ -811,7 +816,14 @@ public class LuceneIndexTest {
         tracker.update(indexed);
         assertQuery(tracker, indexed, "foo3", "bar3");
         assertEquals(0, copier.getInvalidFileCount());
-        assertEquals(1, copier.getIndexDir("/oak:index/lucene").listFiles().length);
+        List<LocalIndexDir> idxDirs = copier.getIndexRootDirectory().getLocalIndexes("/oak:index/lucene");
+        List<LocalIndexDir> nonEmptyDirs = Lists.newArrayList();
+        for (LocalIndexDir dir : idxDirs){
+            if (!dir.isEmpty()){
+                nonEmptyDirs.add(dir);
+            }
+        }
+        assertEquals(1, nonEmptyDirs.size());
     }
 
     @Test
@@ -899,6 +911,28 @@ public class LuceneIndexTest {
         assertEquals("/oak:index/lucene", defn.getIndexPathFromConfig());
     }
 
+
+    @Test
+    public void luceneWithCopyOnReadDir_Compat() throws Exception{
+        NodeBuilder index = builder.child(INDEX_DEFINITIONS_NAME);
+        newLucenePropertyIndexDefinition(index, "lucene", ImmutableSet.of("foo", "foo2"), null);
+
+        NodeState before = builder.getNodeState();
+        builder.setProperty("foo", "bar");
+        NodeState after = builder.getNodeState();
+
+        NodeState indexed = HOOK.processCommit(before, after,CommitInfo.EMPTY);
+
+        builder = indexed.builder();
+        builder.getChildNode("oak:index").getChildNode("lucene").removeProperty(IndexConstants.INDEX_PATH);
+        indexed = builder.getNodeState();
+
+        File indexRootDir = new File(getIndexDir());
+        tracker = new IndexTracker(new IndexCopier(sameThreadExecutor(), indexRootDir));
+        tracker.update(indexed);
+
+        assertQuery(tracker, indexed, "foo", "bar");
+    }
 
     @After
     public void cleanUp(){

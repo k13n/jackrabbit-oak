@@ -18,7 +18,6 @@
  */
 package org.apache.jackrabbit.oak.segment;
 
-import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.collect.Lists.newArrayList;
 import static com.google.common.collect.Maps.newHashMapWithExpectedSize;
 import static java.util.Collections.nCopies;
@@ -28,10 +27,11 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
 
 import javax.annotation.Nonnull;
 
-import com.google.common.base.Predicate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -63,9 +63,6 @@ public class SegmentIdTable {
     private final ArrayList<WeakReference<SegmentId>> references =
             newArrayList(nCopies(1024, (WeakReference<SegmentId>) null));
 
-    @Nonnull
-    private final SegmentStore store;
-
     private static final Logger LOG = LoggerFactory.getLogger(SegmentIdTable.class);
 
     
@@ -79,19 +76,19 @@ public class SegmentIdTable {
      */
     private int entryCount;
 
-    SegmentIdTable(@Nonnull SegmentStore store) {
-        this.store = checkNotNull(store);
-    }
-
     /**
-     * Get the segment id, and reference it in the weak references map.
-     * 
-     * @param msb
-     * @param lsb
+     * Get the segment id, and reference it in the weak references map. If the
+     * pair of MSB/LSB is not tracked by this table, a new instance of {@link
+     * SegmentId} is created using the provided {@link SegmentIdFactory} and
+     * tracked by this table.
+     *
+     * @param msb   The most significant bits of the {@link SegmentId}.
+     * @param lsb   The least significant bits of the {@link SegmentId}.
+     * @param maker A non-{@code null} instance of {@link SegmentIdFactory}.
      * @return the segment id
      */
     @Nonnull
-    synchronized SegmentId getSegmentId(long msb, long lsb) {
+    synchronized SegmentId newSegmentId(long msb, long lsb, SegmentIdFactory maker) {
         int index = getIndex(lsb);
         boolean shouldRefresh = false;
 
@@ -110,7 +107,7 @@ public class SegmentIdTable {
             reference = references.get(index);
         }
 
-        SegmentId id = new SegmentId(store, msb, lsb);
+        SegmentId id = maker.newSegmentId(msb, lsb);
         references.set(index, new WeakReference<SegmentId>(id));
         entryCount++;
         if (entryCount > references.size() * 0.75) {
@@ -198,25 +195,14 @@ public class SegmentIdTable {
         return ((int) lsb) & (references.size() - 1);
     }
 
-    synchronized void clearSegmentIdTables(Predicate<SegmentId> canRemove) {
-        boolean dirty = false;
+    synchronized void clearSegmentIdTables(@Nonnull Set<UUID> reclaimed, @Nonnull String gcInfo) {
         for (WeakReference<SegmentId> reference : references) {
             if (reference != null) {
                 SegmentId id = reference.get();
-                if (id != null) {
-                    if (canRemove.apply(id)) {
-                        // we clear the reference here, but we must not
-                        // remove the reference from the list, because
-                        // that could cause duplicate references
-                        // (there is a unit test for this case)
-                        reference.clear();
-                        dirty = true;
-                    }
+                if (id != null && reclaimed.contains(id.asUUID())) {
+                    id.reclaimed(gcInfo);
                 }
             }
-        }
-        if (dirty) {
-            refresh();
         }
     }
     

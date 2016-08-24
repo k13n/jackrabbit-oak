@@ -53,13 +53,6 @@
             </goals>
             <configuration>
               <createDependencyReducedPom>false</createDependencyReducedPom>
-              <filters>
-                <filter>
-                  <artifact>*</artifact>
-                  <excludes>
-                  </excludes>
-                </filter>
-              </filters>
               <transformers>
                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
                   <mainClass>org.apache.jackrabbit.oak.upgrade.cli.OakUpgrade</mainClass>
@@ -75,11 +68,6 @@
   <dependencies>
     <dependency>
       <groupId>org.apache.jackrabbit</groupId>
-      <artifactId>oak-blob-cloud</artifactId>
-      <version>${project.version}</version>
-    </dependency>
-    <dependency>
-      <groupId>org.apache.jackrabbit</groupId>
       <artifactId>oak-core</artifactId>
       <version>${project.version}</version>
     </dependency>
@@ -91,11 +79,21 @@
     <dependency>
       <groupId>org.apache.jackrabbit</groupId>
       <artifactId>oak-segment-tar</artifactId>
-      <version>${project.version}</version>
+      <version>${segment.tar.version}</version>
     </dependency>
     <dependency>
       <groupId>org.apache.jackrabbit</groupId>
       <artifactId>jackrabbit-core</artifactId>
+      <version>${jackrabbit.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.jackrabbit</groupId>
+      <artifactId>jackrabbit-data</artifactId>
+      <version>${jackrabbit.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.jackrabbit</groupId>
+      <artifactId>jackrabbit-aws-ext</artifactId>
       <version>${jackrabbit.version}</version>
     </dependency>
     <dependency>
@@ -107,6 +105,10 @@
     <dependency>
       <groupId>commons-lang</groupId>
       <artifactId>commons-lang</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.commons</groupId>
+      <artifactId>commons-math3</artifactId>
     </dependency>
     <dependency>
       <groupId>net.sf.jopt-simple</groupId>
@@ -163,24 +165,6 @@
       <groupId>com.h2database</groupId>
       <artifactId>h2</artifactId>
       <version>${h2.version}</version>
-      <scope>test</scope>
-    </dependency>
-    <dependency>
-      <groupId>com.amazonaws</groupId>
-      <artifactId>aws-java-sdk</artifactId>
-      <version>1.9.11</version>
-      <exclusions>
-        <exclusion>
-          <groupId>joda-time</groupId>
-          <artifactId>joda-time</artifactId>
-        </exclusion>
-      </exclusions>
-      <scope>test</scope>
-    </dependency>
-    <dependency>
-      <groupId>joda-time</groupId>
-      <artifactId>joda-time</artifactId>
-      <version>2.2</version>
       <scope>test</scope>
     </dependency>
   </dependencies>

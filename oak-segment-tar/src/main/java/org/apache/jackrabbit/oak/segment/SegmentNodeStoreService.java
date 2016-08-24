@@ -29,17 +29,19 @@ import static org.apache.jackrabbit.oak.segment.compaction.SegmentGCOptions.GAIN
 import static org.apache.jackrabbit.oak.segment.compaction.SegmentGCOptions.MEMORY_THRESHOLD_DEFAULT;
 import static org.apache.jackrabbit.oak.segment.compaction.SegmentGCOptions.PAUSE_DEFAULT;
 import static org.apache.jackrabbit.oak.segment.compaction.SegmentGCOptions.RETRY_COUNT_DEFAULT;
+import static org.apache.jackrabbit.oak.segment.file.FileStoreBuilder.fileStoreBuilder;
 import static org.apache.jackrabbit.oak.spi.blob.osgi.SplitBlobStoreService.ONLY_STANDALONE_TARGET;
 import static org.apache.jackrabbit.oak.spi.whiteboard.WhiteboardUtils.registerMBean;
-import static org.apache.jackrabbit.oak.spi.whiteboard.WhiteboardUtils.scheduleWithFixedDelay;
 
 import java.io.ByteArrayInputStream;
 import java.io.Closeable;
 import java.io.File;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Dictionary;
 import java.util.Hashtable;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.felix.scr.annotations.Activate;
@@ -69,10 +71,11 @@ import org.apache.jackrabbit.oak.segment.compaction.SegmentGCOptions;
 import org.apache.jackrabbit.oak.segment.compaction.SegmentRevisionGC;
 import org.apache.jackrabbit.oak.segment.compaction.SegmentRevisionGCMBean;
 import org.apache.jackrabbit.oak.segment.file.FileStore;
-import org.apache.jackrabbit.oak.segment.file.FileStore.Builder;
+import org.apache.jackrabbit.oak.segment.file.FileStoreBuilder;
 import org.apache.jackrabbit.oak.segment.file.FileStoreGCMonitor;
 import org.apache.jackrabbit.oak.segment.file.FileStoreStatsMBean;
 import org.apache.jackrabbit.oak.segment.file.GCMonitorMBean;
+import org.apache.jackrabbit.oak.segment.file.InvalidFileStoreVersionException;
 import org.apache.jackrabbit.oak.spi.blob.BlobStore;
 import org.apache.jackrabbit.oak.spi.blob.GarbageCollectableBlobStore;
 import org.apache.jackrabbit.oak.spi.commit.Observable;
@@ -134,10 +137,52 @@ public class SegmentNodeStoreService extends ProxyNodeStore
 
     @Property(
             intValue = 256,
-            label = "Cache size (MB)",
-            description = "Cache size for storing most recently used Segments"
+            label = "Segment cache size (MB)",
+            description = "Cache size for storing most recently used segments"
     )
-    public static final String CACHE = "cache";
+    public static final String SEGMENT_CACHE_SIZE = "segmentCache.size";
+
+    @Property(
+            intValue = 256,
+            label = "String cache size (MB)",
+            description = "Cache size for storing most recently used strings"
+    )
+    public static final String STRING_CACHE_SIZE = "stringCache.size";
+
+    @Property(
+            intValue = 64,
+            label = "Template cache size (MB)",
+            description = "Cache size for storing most recently used templates"
+    )
+    public static final String TEMPLATE_CACHE_SIZE = "templateCache.size";
+
+    @Property(
+            intValue = 15000,
+            label = "String deduplication cache size (#items)",
+            description = "Maximum number of strings to keep in the deduplication cache"
+    )
+    public static final String STRING_DEDUPLICATION_CACHE_SIZE = "stringDeduplicationCache.size";
+
+    @Property(
+            intValue = 3000,
+            label = "Template deduplication cache size (#items)",
+            description = "Maximum number of templates to keep in the deduplication cache"
+    )
+    public static final String TEMPLATE_DEDUPLICATION_CACHE_SIZE = "templateDeduplicationCache.size";
+
+    @Property(
+            intValue = 10000000,
+            label = "Node deduplication cache size  (#items)",
+            description = "Maximum number of nodes to keep in the deduplication cache"
+    )
+    public static final String NODE_DEDUPLICATION_CACHE_SIZE = "nodeDeduplicationCache.size";
+
+    @Property(
+            intValue = 20,
+            label = "Node deduplication cache depth  (#levels)",
+            description = "Maximum number of levels to keep in the node deduplication cache"
+    )
+    public static final String NODE_DEDUPLICATION_CACHE_DEPTH = "nodeDeduplicationCache.depth";
 
     @Property(
             byteValue = MEMORY_THRESHOLD_DEFAULT,
@@ -150,7 +195,7 @@ public class SegmentNodeStoreService extends ProxyNodeStore
             byteValue = GAIN_THRESHOLD_DEFAULT,
             label = "Compaction gain threshold",
             description = "TarMK compaction gain threshold. The gain estimation prevents compaction from running " +
-                    "if the provided threshold is not met. Value represents a percentage so an input beween 0 and 100 is expected."
+                    "if the provided threshold is not met. Value represents a percentage so an input between 0 and 100 is expected."
     )
     public static final String COMPACTION_GAIN_THRESHOLD = "compaction.gainThreshold";
 
@@ -225,20 +270,10 @@ public class SegmentNodeStoreService extends ProxyNodeStore
 
     private ServiceRegistration storeRegistration;
     private ServiceRegistration providerRegistration;
-    private Registration checkpointRegistration;
-    private Registration revisionGCRegistration;
-    private Registration blobGCRegistration;
-    private Registration gcOptionsRegistration;
-    private Registration segmentCacheMBean;
-    private Registration stringCacheMBean;
-    private Registration fsgcMonitorMBean;
-    private Registration fileStoreStatsMBean;
+
+    private final List<Registration> registrations = new ArrayList<>();
     private WhiteboardExecutor executor;
     private boolean customBlobStore;
-
-    private Registration discoveryLiteDescriptorRegistration;
-
-    private Registration clusterIdDescriptorRegistration;
 
     /**
      * Blob modified before this time duration would be considered for Blob GC
@@ -333,8 +368,14 @@ public class SegmentNodeStoreService extends ProxyNodeStore
         SegmentGCOptions gcOptions = newGCOptions();
 
         // Build the FileStore
-        Builder builder = FileStore.builder(getDirectory())
-                .withCacheSize(getCacheSize())
+        FileStoreBuilder builder = fileStoreBuilder(getDirectory())
+                .withSegmentCacheSize(getSegmentCacheSize())
+                .withStringCacheSize(getStringCacheSize())
+                .withTemplateCacheSize(getTemplateCacheSize())
+                .withStringDeduplicationCacheSize(getStringDeduplicationCacheSize())
+                .withTemplateDeduplicationCacheSize(getTemplateDeduplicationCacheSize())
+                .withNodeDeduplicationCacheSize(getNodeDeduplicationCacheSize())
+                .withNodeDeduplicationDepth(getNodeDeduplicationDepth())
                 .withMaxFileSize(getMaxFileSize())
                 .withMemoryMapping(getMode().equals("64"))
                 .withGCMonitor(gcMonitor)
@@ -346,38 +387,78 @@ public class SegmentNodeStoreService extends ProxyNodeStore
             builder.withBlobStore(blobStore);
         }
 
-        store = builder.build();
+        try {
+            store = builder.build();
+        } catch (InvalidFileStoreVersionException e) {
+            log.error("The segment store data is not compatible with the current version. Please use oak-segment or a different version of oak-segment-tar.");
+            return false;
+        }
 
         // Expose an MBean to provide information about the gc options
 
-        gcOptionsRegistration = registerMBean(
+        registrations.add(registerMBean(
                 whiteboard,
                 SegmentRevisionGC.class,
                 new SegmentRevisionGCMBean(gcOptions),
                 SegmentRevisionGC.TYPE,
                 "Segment node store gc options"
-        );
+        ));
 
         // Expose stats about the segment cache
 
-        CacheStats segmentCacheStats = store.getSegmentCacheStats();
-         segmentCacheMBean = registerMBean(
+        CacheStatsMBean segmentCacheStats = store.getSegmentCacheStats();
+        registrations.add(registerMBean(
                 whiteboard,
                 CacheStatsMBean.class,
                 segmentCacheStats,
                 CacheStats.TYPE,
                 segmentCacheStats.getName()
-        );
+        ));
 
-        // Expose stats about the string cache, if available
+        // Expose stats about the string and template caches
 
-        CacheStats stringCacheStats = store.getStringCacheStats();
-        stringCacheMBean = registerMBean(
+        CacheStatsMBean stringCacheStats = store.getStringCacheStats();
+        registrations.add(registerMBean(
                 whiteboard,
                 CacheStatsMBean.class,
                 stringCacheStats,CacheStats.TYPE,
                 stringCacheStats.getName()
-        );
+        ));
+
+        CacheStatsMBean templateCacheStats = store.getTemplateCacheStats();
+        registrations.add(registerMBean(
+                whiteboard,
+                CacheStatsMBean.class,
+                templateCacheStats,CacheStats.TYPE,
+                templateCacheStats.getName()
+        ));
+
+        CacheStatsMBean stringDeduplicationCacheStats = store.getStringDeduplicationCacheStats();
+        if (stringDeduplicationCacheStats != null) {
+            registrations.add(registerMBean(
+            whiteboard,
+            CacheStatsMBean.class,
+            stringDeduplicationCacheStats,CacheStats.TYPE,
+            stringDeduplicationCacheStats.getName()));
+        }
+
+        CacheStatsMBean templateDeduplicationCacheStats = store.getTemplateDeduplicationCacheStats();
+        if (templateDeduplicationCacheStats != null) {
+            registrations.add(registerMBean(
+            whiteboard,
+            CacheStatsMBean.class,
+            templateDeduplicationCacheStats,CacheStats.TYPE,
+            templateDeduplicationCacheStats.getName()));
+        }
+
+        CacheStatsMBean nodeDeduplicationCacheStats = store.getNodeDeduplicationCacheStats();
+        if (nodeDeduplicationCacheStats != null) {
+            registrations.add(registerMBean(
+            whiteboard,
+            CacheStatsMBean.class,
+            nodeDeduplicationCacheStats,CacheStats.TYPE,
+            nodeDeduplicationCacheStats.getName()));
+        }
 
         // Listen for Executor services on the whiteboard
 
@@ -395,29 +476,29 @@ public class SegmentNodeStoreService extends ProxyNodeStore
 
         };
 
-        revisionGCRegistration = registerMBean(
+        registrations.add(registerMBean(
                 whiteboard,
                 RevisionGCMBean.class,
                 new RevisionGC(triggerGarbageCollection, executor),
                 RevisionGCMBean.TYPE,
                 "Segment node store revision garbage collection"
-        );
+        ));
 
         // Expose statistics about the FileStore
 
-        fileStoreStatsMBean = registerMBean(
+        registrations.add(registerMBean(
                 whiteboard,
                 FileStoreStatsMBean.class,
                 store.getStats(),
                 FileStoreStatsMBean.TYPE,
                 "FileStore statistics"
-        );
+        ));
 
         // Register a monitor for the garbage collection of the FileStore
 
         FileStoreGCMonitor fsgcm = new FileStoreGCMonitor(Clock.SIMPLE);
 
-        fsgcMonitorMBean = new CompositeRegistration(
+        registrations.add((new CompositeRegistration(
                 whiteboard.register(GCMonitor.class, fsgcm, emptyMap()),
                 registerMBean(
                         whiteboard,
@@ -425,9 +506,8 @@ public class SegmentNodeStoreService extends ProxyNodeStore
                         fsgcm,
                         GCMonitorMBean.TYPE,
                         "File Store garbage collection monitor"
-                ),
-                scheduleWithFixedDelay(whiteboard, fsgcm, 1)
-        );
+                )
+        )));
 
         // Register a factory service to expose the FileStore
 
@@ -464,8 +544,8 @@ public class SegmentNodeStoreService extends ProxyNodeStore
         observerTracker = new ObserverTracker(segmentNodeStore);
         observerTracker.start(context.getBundleContext());
 
-        checkpointRegistration = registerMBean(whiteboard, CheckpointMBean.class, new SegmentCheckpointMBean(segmentNodeStore),
-                CheckpointMBean.TYPE, "Segment node store checkpoint management");
+        registrations.add(registerMBean(whiteboard, CheckpointMBean.class, new SegmentCheckpointMBean(segmentNodeStore),
+                CheckpointMBean.TYPE, "Segment node store checkpoint management"));
 
         // ensure a clusterId is initialized
         // and expose it as 'oak.clusterid' repository descriptor
@@ -473,18 +553,18 @@ public class SegmentNodeStoreService extends ProxyNodeStore
         clusterIdDesc.put(ClusterRepositoryInfo.OAK_CLUSTERID_REPOSITORY_DESCRIPTOR_KEY,
                 new SimpleValueFactory().createValue(
                         ClusterRepositoryInfo.getOrCreateId(segmentNodeStore)), true, false);
-        clusterIdDescriptorRegistration = whiteboard.register(
+        registrations.add(whiteboard.register(
                 Descriptors.class,
                 clusterIdDesc,
                 Collections.emptyMap()
-        );
+        ));
 
         // Register "discovery lite" descriptors
-        discoveryLiteDescriptorRegistration = whiteboard.register(
+        registrations.add(whiteboard.register(
                 Descriptors.class,
                 new SegmentDiscoveryLiteDescriptors(segmentNodeStore),
                 Collections.emptyMap()
-        );
+        ));
 
         // If a shared data store register the repo id in the data store
         String repoId = "";
@@ -507,13 +587,13 @@ public class SegmentNodeStoreService extends ProxyNodeStore
                     repoId
             );
 
-            blobGCRegistration = registerMBean(
+            registrations.add(registerMBean(
                     whiteboard,
                     BlobGCMBean.class,
                     new BlobGC(gc, executor),
                     BlobGCMBean.TYPE,
                     "Segment node store blob garbage collection"
-            );
+            ));
         }
 
         log.info("SegmentNodeStore initialized");
@@ -521,22 +601,7 @@ public class SegmentNodeStoreService extends ProxyNodeStore
     }
 
     private void unregisterNodeStore() {
-        if (discoveryLiteDescriptorRegistration != null) {
-            discoveryLiteDescriptorRegistration.unregister();
-            discoveryLiteDescriptorRegistration = null;
-        }
-        if (clusterIdDescriptorRegistration != null) {
-            clusterIdDescriptorRegistration.unregister();
-            clusterIdDescriptorRegistration = null;
-        }
-        if (segmentCacheMBean != null) {
-            segmentCacheMBean.unregister();
-            segmentCacheMBean = null;
-        }
-        if (stringCacheMBean != null) {
-            stringCacheMBean.unregister();
-            stringCacheMBean = null;
-        }
+        new CompositeRegistration(registrations).unregister();
         if (providerRegistration != null) {
             providerRegistration.unregister();
             providerRegistration = null;
@@ -544,30 +609,6 @@ public class SegmentNodeStoreService extends ProxyNodeStore
         if (storeRegistration != null) {
             storeRegistration.unregister();
             storeRegistration = null;
-        }
-        if (checkpointRegistration != null) {
-            checkpointRegistration.unregister();
-            checkpointRegistration = null;
-        }
-        if (revisionGCRegistration != null) {
-            revisionGCRegistration.unregister();
-            revisionGCRegistration = null;
-        }
-        if (blobGCRegistration != null) {
-            blobGCRegistration.unregister();
-            blobGCRegistration = null;
-        }
-        if (gcOptionsRegistration != null) {
-            gcOptionsRegistration.unregister();
-            gcOptionsRegistration = null;
-        }
-        if (fsgcMonitorMBean != null) {
-            fsgcMonitorMBean.unregister();
-            fsgcMonitorMBean = null;
-        }
-        if (fileStoreStatsMBean != null) {
-            fileStoreStatsMBean.unregister();
-            fileStoreStatsMBean = null;
         }
         if (executor != null) {
             executor.stop();
@@ -599,18 +640,42 @@ public class SegmentNodeStoreService extends ProxyNodeStore
         return System.getProperty(MODE, System.getProperty("sun.arch.data.model", "32"));
     }
 
-    private String getCacheSizeProperty() {
-        String cache = property(CACHE);
+    private String getCacheSize(String propertyName) {
+        String cacheSize = property(propertyName);
 
-        if (cache != null) {
-            return cache;
+        if (cacheSize != null) {
+            return cacheSize;
         }
 
-        return System.getProperty(CACHE);
+        return System.getProperty(propertyName);
     }
 
-    private int getCacheSize() {
-        return Integer.parseInt(getCacheSizeProperty());
+    private int getSegmentCacheSize() {
+        return Integer.parseInt(getCacheSize(SEGMENT_CACHE_SIZE));
+    }
+
+    private int getStringCacheSize() {
+        return Integer.parseInt(getCacheSize(STRING_CACHE_SIZE));
+    }
+
+    private int getTemplateCacheSize() {
+        return Integer.parseInt(getCacheSize(TEMPLATE_CACHE_SIZE));
+    }
+
+    private int getStringDeduplicationCacheSize() {
+        return Integer.parseInt(getCacheSize(STRING_DEDUPLICATION_CACHE_SIZE));
+    }
+
+    private int getTemplateDeduplicationCacheSize() {
+        return Integer.parseInt(getCacheSize(TEMPLATE_DEDUPLICATION_CACHE_SIZE));
+    }
+
+    private int getNodeDeduplicationCacheSize() {
+        return Integer.parseInt(getCacheSize(NODE_DEDUPLICATION_CACHE_SIZE));
+    }
+
+    private int getNodeDeduplicationDepth() {
+        return Integer.parseInt(getCacheSize(NODE_DEDUPLICATION_CACHE_DEPTH));
     }
 
     private String getMaxFileSizeProperty() {

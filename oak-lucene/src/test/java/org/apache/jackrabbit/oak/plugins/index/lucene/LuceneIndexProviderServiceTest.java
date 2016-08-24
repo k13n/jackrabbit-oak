@@ -19,6 +19,14 @@
 
 package org.apache.jackrabbit.oak.plugins.index.lucene;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+import static org.mockito.Mockito.mock;
+
+import java.io.File;
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
@@ -29,22 +37,20 @@ import org.apache.jackrabbit.oak.api.jmx.CacheStatsMBean;
 import org.apache.jackrabbit.oak.plugins.index.IndexEditorProvider;
 import org.apache.jackrabbit.oak.plugins.index.fulltext.ExtractedText;
 import org.apache.jackrabbit.oak.plugins.index.fulltext.PreExtractedTextProvider;
+import org.apache.jackrabbit.oak.plugins.index.lucene.score.ScorerProviderFactory;
 import org.apache.jackrabbit.oak.spi.commit.BackgroundObserver;
 import org.apache.jackrabbit.oak.spi.commit.Observer;
+import org.apache.jackrabbit.oak.spi.mount.MountInfoProvider;
+import org.apache.jackrabbit.oak.spi.mount.Mounts;
 import org.apache.jackrabbit.oak.spi.query.QueryIndexProvider;
 import org.apache.lucene.search.BooleanQuery;
 import org.apache.lucene.util.InfoStream;
 import org.apache.sling.testing.mock.osgi.MockOsgi;
 import org.apache.sling.testing.mock.osgi.junit.OsgiContext;
+import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
-
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertTrue;
 
 public class LuceneIndexProviderServiceTest {
     /*
@@ -54,12 +60,20 @@ public class LuceneIndexProviderServiceTest {
      */
 
     @Rule
-    public final TemporaryFolder folder = new TemporaryFolder();
+    public final TemporaryFolder folder = new TemporaryFolder(new File("target"));
 
     @Rule
     public final OsgiContext context = new OsgiContext();
 
     private LuceneIndexProviderService service = new LuceneIndexProviderService();
+
+    @Before
+    public void setUp(){
+        context.registerService(MountInfoProvider.class, Mounts.defaultMountInfoProvider());
+        context.registerService(ScorerProviderFactory.class, ScorerProviderFactory.DEFAULT);
+        context.registerService(IndexAugmentorFactory.class, mock(IndexAugmentorFactory.class));
+        MockOsgi.injectServices(service, context.bundleContext());
+    }
 
     @Test
     public void defaultSetup() throws Exception{

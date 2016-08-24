@@ -18,23 +18,30 @@ package org.apache.jackrabbit.oak.upgrade;
 
 import java.util.ArrayList;
 import java.util.Calendar;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Set;
 
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import javax.jcr.RepositoryException;
 
+import com.google.common.base.Function;
 import org.apache.jackrabbit.oak.Oak;
 import org.apache.jackrabbit.oak.api.CommitFailedException;
+import org.apache.jackrabbit.oak.commons.PathUtils;
 import org.apache.jackrabbit.oak.plugins.nodetype.write.InitialContent;
 import org.apache.jackrabbit.oak.spi.commit.CommitHook;
 import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
+import org.apache.jackrabbit.oak.spi.commit.CompositeEditorProvider;
 import org.apache.jackrabbit.oak.spi.commit.EditorHook;
 import org.apache.jackrabbit.oak.spi.lifecycle.RepositoryInitializer;
+import org.apache.jackrabbit.oak.spi.state.ChildNodeEntry;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
 import org.apache.jackrabbit.oak.upgrade.RepositoryUpgrade.LoggingCompositeHook;
+import org.apache.jackrabbit.oak.upgrade.cli.node.TarNodeStore;
 import org.apache.jackrabbit.oak.upgrade.nodestate.NameFilteringNodeState;
 import org.apache.jackrabbit.oak.upgrade.nodestate.report.LoggingReporter;
 import org.apache.jackrabbit.oak.upgrade.nodestate.report.ReportingNodeState;
@@ -47,11 +54,16 @@ import org.slf4j.LoggerFactory;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.collect.ImmutableSet.copyOf;
 import static com.google.common.collect.ImmutableSet.of;
+import static com.google.common.collect.Lists.newArrayList;
+import static com.google.common.collect.Lists.transform;
 import static com.google.common.collect.Sets.union;
+import static java.util.Collections.sort;
 import static org.apache.jackrabbit.oak.upgrade.RepositoryUpgrade.DEFAULT_EXCLUDE_PATHS;
 import static org.apache.jackrabbit.oak.upgrade.RepositoryUpgrade.DEFAULT_INCLUDE_PATHS;
 import static org.apache.jackrabbit.oak.upgrade.RepositoryUpgrade.DEFAULT_MERGE_PATHS;
 import static org.apache.jackrabbit.oak.upgrade.RepositoryUpgrade.calculateEffectiveIncludePaths;
+import static org.apache.jackrabbit.oak.upgrade.RepositoryUpgrade.createIndexEditorProvider;
+import static org.apache.jackrabbit.oak.upgrade.RepositoryUpgrade.createTypeEditorProvider;
 import static org.apache.jackrabbit.oak.upgrade.RepositoryUpgrade.markIndexesToBeRebuilt;
 import static org.apache.jackrabbit.oak.upgrade.nodestate.NodeStateCopier.copyProperties;
 import static org.apache.jackrabbit.oak.upgrade.version.VersionCopier.copyVersionStorage;
@@ -82,7 +94,9 @@ public class RepositorySidegrade {
      */
     private Set<String> mergePaths = DEFAULT_MERGE_PATHS;
 
-    private boolean skipLongNames = true;
+    private boolean includeIndex = false;
+
+    private boolean filterLongNames = true;
 
     private boolean skipInitialization = false;
 
@@ -109,8 +123,8 @@ public class RepositorySidegrade {
      * not referenced by the existing nodes). By default all orphaned version
      * histories are copied. One may disable it completely by setting
      * {@code null} here or limit it to a selected date range:
-     * {@code <minDate, now()>}. <br/>
-     * <br/>
+     * {@code <minDate, now()>}. <br>
+     * <br>
      * Please notice, that this option is overriden by the
      * {@link #setCopyVersions(Calendar)}. You can't copy orphaned versions
      * older than set in {@link #setCopyVersions(Calendar)} and if you set
@@ -178,6 +192,9 @@ public class RepositorySidegrade {
         this.excludePaths = copyOf(checkNotNull(excludes));
     }
 
+    public void setIncludeIndex(boolean includeIndex) {
+        this.includeIndex = includeIndex;
+    }
 
     /**
      * Sets the paths that should be merged when the source repository
@@ -189,12 +206,12 @@ public class RepositorySidegrade {
         this.mergePaths = copyOf(checkNotNull(merges));
     }
 
-    public boolean isSkipLongNames() {
-        return skipLongNames;
+    public boolean isFilterLongNames() {
+        return filterLongNames;
     }
 
-    public void setSkipLongNames(boolean skipLongNames) {
-        this.skipLongNames = skipLongNames;
+    public void setFilterLongNames(boolean filterLongNames) {
+        this.filterLongNames = filterLongNames;
     }
 
     /**
@@ -243,7 +260,7 @@ public class RepositorySidegrade {
 
             final NodeState reportingSourceRoot = ReportingNodeState.wrap(source.getRoot(), new LoggingReporter(LOG, "Copying", 10000, -1));
             final NodeState sourceRoot;
-            if (skipLongNames) {
+            if (filterLongNames) {
                 sourceRoot = NameFilteringNodeState.wrap(reportingSourceRoot);
             } else {
                 sourceRoot = reportingSourceRoot;
@@ -256,14 +273,30 @@ public class RepositorySidegrade {
     }
 
     private void removeCheckpointReferences(NodeBuilder builder) throws CommitFailedException {
-        // removing references to the checkpoints, 
+        // removing references to the checkpoints,
         // which don't exist in the new repository
         builder.setChildNode(":async");
     }
 
     private void copyState(NodeState sourceRoot, NodeBuilder targetRoot) throws CommitFailedException {
         copyWorkspace(sourceRoot, targetRoot);
-        removeCheckpointReferences(targetRoot);
+
+        if (includeIndex) {
+            IndexCopier.copy(sourceRoot, targetRoot, includePaths);
+        }
+
+        boolean isRemoveCheckpointReferences = false;
+        if (!copyCheckpoints(targetRoot)) {
+            LOG.info("Copying checkpoints is not supported for this combination of node stores");
+            isRemoveCheckpointReferences = true;
+        }
+        if (!DEFAULT_INCLUDE_PATHS.equals(includePaths)) {
+            isRemoveCheckpointReferences = true;
+        }
+        if (isRemoveCheckpointReferences) {
+            removeCheckpointReferences(targetRoot);
+        }
+
         if (!versionCopyConfiguration.skipOrphanedVersionsCopy()) {
             copyVersionStorage(sourceRoot, targetRoot, versionCopyConfiguration);
         }
@@ -277,6 +310,12 @@ public class RepositorySidegrade {
         }
 
         markIndexesToBeRebuilt(targetRoot);
+
+        // type validation, reference and indexing hooks
+        hooks.add(new EditorHook(new CompositeEditorProvider(
+                createTypeEditorProvider(),
+                createIndexEditorProvider()
+        )));
 
         target.merge(targetRoot, new LoggingCompositeHook(hooks, null, false), CommitInfo.EMPTY);
     }
@@ -295,5 +334,78 @@ public class RepositorySidegrade {
         if (includePaths.contains("/")) {
             copyProperties(sourceRoot, targetRoot);
         }
+    }
+
+    private boolean copyCheckpoints(NodeBuilder targetRoot) {
+        if (!(source instanceof TarNodeStore && target instanceof TarNodeStore)) {
+            return false;
+        }
+
+        TarNodeStore sourceTarNS = (TarNodeStore) source;
+        TarNodeStore targetTarNS = (TarNodeStore) target;
+
+        NodeState srcSuperRoot = sourceTarNS.getSuperRoot();
+        NodeBuilder builder = targetTarNS.getSuperRoot().builder();
+
+        String previousRoot = null;
+        for (String checkpoint : getCheckpointPaths(srcSuperRoot)) {
+            // copy the checkpoint without the root
+            NodeStateCopier.builder()
+                    .include(checkpoint)
+                    .exclude(checkpoint + "/root")
+                    .copy(srcSuperRoot, builder);
+
+            // reference the previousRoot or targetRoot as a new checkpoint root
+            NodeState baseRoot;
+            if (previousRoot == null) {
+                baseRoot = targetRoot.getNodeState();
+            } else {
+                baseRoot = getBuilder(builder, previousRoot).getNodeState();
+            }
+            NodeBuilder targetParent = getBuilder(builder, checkpoint);
+            targetParent.setChildNode("root", baseRoot);
+            previousRoot = checkpoint + "/root";
+
+            // apply diff changes
+            NodeStateCopier.builder()
+                    .include(checkpoint + "/root")
+                    .copy(srcSuperRoot, builder);
+        }
+
+        targetTarNS.setSuperRoot(builder);
+        return true;
+   }
+
+    /**
+     * Return all checkpoint paths, sorted by their "created" property, descending.
+     *
+     * @param superRoot
+     * @return
+     */
+    private static List<String> getCheckpointPaths(NodeState superRoot) {
+        List<ChildNodeEntry> checkpoints = newArrayList(superRoot.getChildNode("checkpoints").getChildNodeEntries().iterator());
+        sort(checkpoints, new Comparator<ChildNodeEntry>() {
+            @Override
+            public int compare(ChildNodeEntry o1, ChildNodeEntry o2) {
+                long c1 = o1.getNodeState().getLong("created");
+                long c2 = o1.getNodeState().getLong("created");
+                return -Long.compare(c1, c2);
+            }
+        });
+        return transform(checkpoints, new Function<ChildNodeEntry, String>() {
+            @Nullable
+            @Override
+            public String apply(@Nullable ChildNodeEntry input) {
+                return "/checkpoints/" + input.getName();
+            }
+        });
+    }
+
+    private static NodeBuilder getBuilder(NodeBuilder root, String path) {
+        NodeBuilder builder = root;
+        for (String element : PathUtils.elements(path)) {
+            builder = builder.child(element);
+        }
+        return builder;
     }
 }

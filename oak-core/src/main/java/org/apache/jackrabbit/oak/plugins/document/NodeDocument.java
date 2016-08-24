@@ -42,6 +42,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Queues;
+import org.apache.jackrabbit.oak.api.PropertyState;
 import org.apache.jackrabbit.oak.cache.CacheValue;
 import org.apache.jackrabbit.oak.commons.PathUtils;
 import org.apache.jackrabbit.oak.commons.json.JsopBuilder;
@@ -955,7 +956,7 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
             return null;
         }
         String path = getPath();
-        DocumentNodeState n = new DocumentNodeState(nodeStore, path, readRevision, hasChildren());
+        List<PropertyState> props = Lists.newArrayList();
         for (String key : keySet()) {
             if (!Utils.isPropertyName(key)) {
                 continue;
@@ -990,7 +991,9 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
             }
             String propertyName = Utils.unescapePropertyName(key);
             String v = value != null ? value.value : null;
-            n.setProperty(propertyName, v);
+            if (v != null){
+                props.add(nodeStore.createPropertyState(propertyName, v));
+            }
         }
 
         // when was this node last modified?
@@ -1041,8 +1044,12 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
                 lastRevision = lastRevision.update(r);
             }
         }
-        n.setLastRevision(lastRevision);
-        return n;
+
+        if (store instanceof RevisionListener) {
+            ((RevisionListener) store).updateAccessedRevision(lastRevision);
+        }
+
+        return new DocumentNodeState(nodeStore, path, readRevision, props, hasChildren(), lastRevision);
     }
 
     /**
@@ -1326,10 +1333,17 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
     }
 
     NodeDocument getPreviousDocument(String prevId){
-        //Use the maxAge variant such that in case of Mongo call for
-        //previous doc are directed towards replicas first
         LOG.trace("get previous document {}", prevId);
-        return store.find(Collection.NODES, prevId, Integer.MAX_VALUE);
+        NodeDocument doc = store.find(Collection.NODES, prevId);
+        if (doc == null) {
+            // In case secondary read preference is used and node is not found
+            // then check with primary again as it might happen that node document has not been
+            // replicated. We know that document with such an id must exist but possibly dut to
+            // replication lag it has not reached to secondary. So in that case read again
+            // from primary
+            doc = store.find(Collection.NODES, prevId, 0);
+        }
+        return doc;
     }
 
     @Nonnull
@@ -2040,6 +2054,7 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
             doc.put(k, fromJson(json));
             json.matches(',');
         }
+        doc.seal();
         return doc;
     }
     

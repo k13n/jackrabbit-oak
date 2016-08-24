@@ -56,7 +56,7 @@ import org.junit.rules.TemporaryFolder;
 public class SegmentVersionTest {
 
     @Rule
-    public TemporaryFolder folder = new TemporaryFolder();
+    public TemporaryFolder folder = new TemporaryFolder(new File("target"));
 
     private File getFileStoreFolder() {
         return folder.getRoot();
@@ -138,7 +138,7 @@ public class SegmentVersionTest {
     }
 
     @Test
-    public void mixedVersions() throws IOException, CommitFailedException {
+    public void mixedVersions() throws Exception {
         FileStore fileStoreV10 = FileStore.builder(getFileStoreFolder()).withMaxFileSize(1).withSegmentVersion(V_10).build();
         try {
             NodeState content10 = addTestContent(fileStoreV10, "content10");
@@ -159,7 +159,7 @@ public class SegmentVersionTest {
     }
 
     @Test
-    public void migrate() throws IOException, CommitFailedException {
+    public void migrate() throws Exception {
         FileStore fileStoreV10 = FileStore.builder(getFileStoreFolder()).withMaxFileSize(1).withSegmentVersion(V_10).build();
         try {
             addTestContent(fileStoreV10, "content10");

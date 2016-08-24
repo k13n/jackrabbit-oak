@@ -16,12 +16,14 @@
  */
 package org.apache.jackrabbit.oak.plugins.document;
 
+import static com.google.common.base.StandardSystemProperty.JAVA_SPECIFICATION_VERSION;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.junit.Assume.assumeFalse;
 
 import java.io.UnsupportedEncodingException;
 import java.util.ArrayList;
@@ -289,6 +291,11 @@ public class BasicDocumentStoreTest extends AbstractDocumentStoreTest {
         while (max - min >= 2) {
             test = (max + min) / 2;
             String id = generateId(test, ascii);
+            // make sure it's gone before trying to create it
+            try {
+                super.ds.remove(Collection.NODES, id);
+            } catch (DocumentStoreException ignored) {
+            }
             UpdateOp up = new UpdateOp(id, true);
             up.set("_id", id);
             boolean success = super.ds.create(Collection.NODES, Collections.singletonList(up));
@@ -527,7 +534,9 @@ public class BasicDocumentStoreTest extends AbstractDocumentStoreTest {
 
     @Test
     public void testInterestingStrings() {
-        // test case  "gclef:\uD834\uDD1E" will fail on MySQL unless properly configured to use utf8mb4 charset        // Assume.assumeTrue(!(super.dsname.equals("RDB-MySQL")));
+        // see OAK-3683
+        assumeFalse(dsf instanceof DocumentStoreFixture.MongoFixture
+                && JAVA_SPECIFICATION_VERSION.value().equals("1.8"));
 
         String[] tests = new String[] { "simple:foo", "cr:a\n\b", "dquote:a\"b", "bs:a\\b", "euro:a\u201c", "gclef:\uD834\uDD1E",
                 "tab:a\tb", "nul:a\u0000b", "brokensurrogate:\ud800" };
@@ -668,25 +677,23 @@ public class BasicDocumentStoreTest extends AbstractDocumentStoreTest {
     public void testUpdateModified() {
         String id = this.getClass().getName() + ".testUpdateModified";
         // create a test node
-        super.ds.remove(Collection.NODES, id);
+        super.ds.remove(Collection.SETTINGS, id);
         UpdateOp up = new UpdateOp(id, true);
         up.set("_id", id);
-        boolean success = super.ds.create(Collection.NODES, Collections.singletonList(up));
+        boolean success = super.ds.create(Collection.SETTINGS, Collections.singletonList(up));
         assertTrue(success);
-        removeMe.add(id);
+        removeMeSettings.add(id);
 
-        ds.invalidateCache();
-        Document d = super.ds.find(Collection.NODES, id);
+        Document d = super.ds.find(Collection.SETTINGS, id);
         Object m = d.get("_modified");
         assertNull("_modified should be null until set", m);
 
         up = new UpdateOp(id, true);
         up.set("_id", id);
         up.set("_modified", 123L);
-        super.ds.findAndUpdate(Collection.NODES, up); 
+        super.ds.findAndUpdate(Collection.SETTINGS, up); 
 
-        ds.invalidateCache();
-        d = super.ds.find(Collection.NODES, id);
+        d = super.ds.find(Collection.SETTINGS, id);
         m = d.get("_modified");
         assertNotNull("_modified should now be != null", m);
         assertEquals("123", m.toString());
@@ -694,10 +701,9 @@ public class BasicDocumentStoreTest extends AbstractDocumentStoreTest {
         up = new UpdateOp(id, true);
         up.set("_id", id);
         up.max("_modified", 122L);
-        super.ds.findAndUpdate(Collection.NODES, up); 
+        super.ds.findAndUpdate(Collection.SETTINGS, up); 
 
-        ds.invalidateCache();
-        d = super.ds.find(Collection.NODES, id);
+        d = super.ds.find(Collection.SETTINGS, id);
         m = d.get("_modified");
         assertNotNull("_modified should now be != null", m);
         assertEquals("123", m.toString());
@@ -705,10 +711,10 @@ public class BasicDocumentStoreTest extends AbstractDocumentStoreTest {
         up = new UpdateOp(id, true);
         up.set("_id", id);
         up.max("_modified", 124L);
-        super.ds.findAndUpdate(Collection.NODES, up); 
+        super.ds.findAndUpdate(Collection.SETTINGS, up); 
 
         ds.invalidateCache();
-        d = super.ds.find(Collection.NODES, id);
+        d = super.ds.find(Collection.SETTINGS, id);
         m = d.get("_modified");
         assertNotNull("_modified should now be != null", m);
         assertEquals("124", m.toString());

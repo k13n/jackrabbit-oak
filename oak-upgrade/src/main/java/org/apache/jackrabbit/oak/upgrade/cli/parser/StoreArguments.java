@@ -27,11 +27,13 @@ import org.apache.jackrabbit.oak.upgrade.cli.blob.BlobStoreFactory;
 import org.apache.jackrabbit.oak.upgrade.cli.blob.DummyBlobStoreFactory;
 import org.apache.jackrabbit.oak.upgrade.cli.blob.FileBlobStoreFactory;
 import org.apache.jackrabbit.oak.upgrade.cli.blob.FileDataStoreFactory;
+import org.apache.jackrabbit.oak.upgrade.cli.blob.MissingBlobStoreFactory;
 import org.apache.jackrabbit.oak.upgrade.cli.blob.S3DataStoreFactory;
 import org.apache.jackrabbit.oak.upgrade.cli.node.StoreFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import static org.apache.jackrabbit.oak.upgrade.cli.parser.OptionParserFactory.IGNORE_MISSING_BINARIES;
 import static org.apache.jackrabbit.oak.upgrade.cli.parser.OptionParserFactory.SRC_FBS;
 import static org.apache.jackrabbit.oak.upgrade.cli.parser.OptionParserFactory.SRC_FDS;
 import static org.apache.jackrabbit.oak.upgrade.cli.parser.OptionParserFactory.SRC_S3;
@@ -40,11 +42,15 @@ import static org.apache.jackrabbit.oak.upgrade.cli.parser.OptionParserFactory.D
 import static org.apache.jackrabbit.oak.upgrade.cli.parser.OptionParserFactory.DST_FDS;
 import static org.apache.jackrabbit.oak.upgrade.cli.parser.OptionParserFactory.DST_S3;
 import static org.apache.jackrabbit.oak.upgrade.cli.parser.OptionParserFactory.DST_S3_CONFIG;
+import static org.apache.jackrabbit.oak.upgrade.cli.parser.OptionParserFactory.MISSING_BLOBSTORE;
 
 import static org.apache.jackrabbit.oak.upgrade.cli.parser.StoreType.JCR2_DIR;
 import static org.apache.jackrabbit.oak.upgrade.cli.parser.StoreType.JCR2_DIR_XML;
 import static org.apache.jackrabbit.oak.upgrade.cli.parser.StoreType.JCR2_XML;
+import static org.apache.jackrabbit.oak.upgrade.cli.parser.StoreType.JDBC;
+import static org.apache.jackrabbit.oak.upgrade.cli.parser.StoreType.MONGO;
 import static org.apache.jackrabbit.oak.upgrade.cli.parser.StoreType.SEGMENT;
+import static org.apache.jackrabbit.oak.upgrade.cli.parser.StoreType.SEGMENT_TAR;
 import static org.apache.jackrabbit.oak.upgrade.cli.parser.StoreType.getMatchingType;
 
 public class StoreArguments {
@@ -77,6 +83,10 @@ public class StoreArguments {
         if (dst.getType() == SEGMENT) {
             logSegmentVersion();
         }
+
+        if (parser.hasOption(MISSING_BLOBSTORE) && !nodeStoresSupportMissingBlobStore()) {
+            throw new CliArgumentException("This combination of node stores is not supported by the --" + MISSING_BLOBSTORE, 1);
+        }
     }
 
     public StoreFactory getSrcStore() {
@@ -87,14 +97,25 @@ public class StoreArguments {
         return dst.getFactory(MigrationDirection.DST, parser);
     }
 
+    public StoreType getSrcType() {
+        return src.getType();
+    }
+
+    public StoreType getDstType() {
+        return dst.getType();
+    }
+
     public BlobStoreFactory getSrcBlobStore() throws IOException {
         BlobStoreFactory factory;
+        boolean ignoreMissingBinaries = parser.hasOption(IGNORE_MISSING_BINARIES);
         if (parser.hasOption(SRC_FBS)) {
             factory = new FileBlobStoreFactory(parser.getOption(SRC_FBS));
         } else if (parser.hasOption(SRC_S3_CONFIG) && parser.hasOption(SRC_S3)) {
-            factory = new S3DataStoreFactory(parser.getOption(SRC_S3_CONFIG), parser.getOption(SRC_S3));
+            factory = new S3DataStoreFactory(parser.getOption(SRC_S3_CONFIG), parser.getOption(SRC_S3), ignoreMissingBinaries);
         } else if (parser.hasOption(SRC_FDS)) {
-            factory = new FileDataStoreFactory(parser.getOption(SRC_FDS));
+            factory = new FileDataStoreFactory(parser.getOption(SRC_FDS), ignoreMissingBinaries);
+        } else if (parser.hasOption(MISSING_BLOBSTORE)) {
+            factory = new MissingBlobStoreFactory();
         } else {
             factory = new DummyBlobStoreFactory();
         }
@@ -107,9 +128,11 @@ public class StoreArguments {
         if (parser.hasOption(DST_FBS)) {
             factory = new FileBlobStoreFactory(parser.getOption(DST_FBS));
         } else if (parser.hasOption(DST_S3_CONFIG) && parser.hasOption(DST_S3)) {
-            factory = new S3DataStoreFactory(parser.getOption(DST_S3_CONFIG), parser.getOption(DST_S3));
+            factory = new S3DataStoreFactory(parser.getOption(DST_S3_CONFIG), parser.getOption(DST_S3), false);
         } else if (parser.hasOption(DST_FDS)) {
-            factory = new FileDataStoreFactory(parser.getOption(DST_FDS));
+            factory = new FileDataStoreFactory(parser.getOption(DST_FDS), false);
+        } else if (parser.hasOption(MISSING_BLOBSTORE)) {
+            factory = new MissingBlobStoreFactory();
         } else {
             factory = new DummyBlobStoreFactory();
         }
@@ -122,10 +145,6 @@ public class StoreArguments {
             return src.getPath().equals(dst.getPath());
         }
         return false;
-    }
-
-    public boolean isSkipLongNames() {
-        return dst.getType() != SEGMENT;
     }
 
     public String[] getSrcPaths() {
@@ -229,6 +248,21 @@ public class StoreArguments {
                 lastVersion);
         if (lastVersion == SegmentVersion.V_11) {
             log.info("Requires Oak 1.0.12, 1.1.7 or later");
+        }
+    }
+
+    private boolean nodeStoresSupportMissingBlobStore() {
+        StoreType srcType = src.getType();
+        StoreType dstType = dst.getType();
+
+        if (srcType.isSegment() && dstType.isSegment()) {
+            return true;
+        } else if (srcType == MONGO && (dstType.isSegment() || dstType == MONGO)) {
+            return true;
+        } else if (srcType == JDBC && (dstType.isSegment() || dstType == JDBC)) {
+            return true;
+        } else {
+            return false;
         }
     }
 

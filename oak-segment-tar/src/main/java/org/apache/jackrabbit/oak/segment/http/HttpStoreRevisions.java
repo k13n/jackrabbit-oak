@@ -34,6 +34,11 @@ import com.google.common.base.Function;
 import org.apache.jackrabbit.oak.segment.RecordId;
 import org.apache.jackrabbit.oak.segment.Revisions;
 
+/**
+ * This {@code Revisions} implementation delegates via HTTP
+ * to its remote counterpart. It does not support setting
+ * the id of the head state.
+ */
 public class HttpStoreRevisions implements Revisions {
 
     @Nonnull
@@ -52,7 +57,7 @@ public class HttpStoreRevisions implements Revisions {
                 InputStream stream = connection.getInputStream();
                 BufferedReader reader = new BufferedReader(new InputStreamReader(stream, UTF_8))
             ) {
-                return RecordId.fromString(store.getTracker(), reader.readLine());
+                return RecordId.fromString(store, reader.readLine());
             }
         } catch (IllegalArgumentException | MalformedURLException e) {
             throw new IllegalStateException(e);
@@ -61,13 +66,21 @@ public class HttpStoreRevisions implements Revisions {
         }
     }
 
+    /**
+     * Not supported: throws {@code UnsupportedOperationException}
+     * @throws UnsupportedOperationException always
+     */
     @Override
     public boolean setHead(
-            @Nonnull RecordId base, @Nonnull RecordId head,
+            @Nonnull RecordId expected, @Nonnull RecordId head,
             @Nonnull Option... options) {
         throw new UnsupportedOperationException();
     }
 
+    /**
+     * Not supported: throws {@code UnsupportedOperationException}
+     * @throws UnsupportedOperationException always
+     */
     @Override
     public boolean setHead(
             @Nonnull Function<RecordId, RecordId> newHead,

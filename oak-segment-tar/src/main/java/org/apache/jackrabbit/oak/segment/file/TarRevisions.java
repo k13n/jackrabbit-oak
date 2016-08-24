@@ -30,7 +30,6 @@ import java.io.Closeable;
 import java.io.File;
 import java.io.IOException;
 import java.io.RandomAccessFile;
-import java.util.Iterator;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -47,20 +46,26 @@ import com.google.common.base.Supplier;
 import org.apache.jackrabbit.oak.segment.RecordId;
 import org.apache.jackrabbit.oak.segment.Revisions;
 import org.apache.jackrabbit.oak.segment.SegmentStore;
-import org.apache.jackrabbit.oak.segment.SegmentTracker;
+import org.apache.jackrabbit.oak.segment.file.FileStore.ReadOnlyStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * This implementation of {@code Revisions} is backed by a
+ * {@link #JOURNAL_FILE_NAME journal} file where the current head is persisted
+ * by calling {@link #flush(Callable)}.
+ * <p>
+ * The {@link #setHead(Function, Option...)} method supports a timeout
+ * {@link Option}, which can be retrieved through factory methods of this class.
+ * <p>
+ * Instance of this class must be {@link #bind(SegmentStore, Supplier) bound} to
+ * a {@code SegmentStore} otherwise its method throw {@code IllegalStateException}s.
+ */
 public class TarRevisions implements Revisions, Closeable {
     private static final Logger LOG = LoggerFactory.getLogger(TarRevisions.class);
 
     public static final String JOURNAL_FILE_NAME = "journal.log";
 
-    private final boolean readOnly;
-
-    /**
-     * The latest head state.
-     */
     @Nonnull
     private final AtomicReference<RecordId> head;
 
@@ -103,15 +108,30 @@ public class TarRevisions implements Revisions, Closeable {
         }
     }
 
+    /**
+     * Timeout option approximating no time out ({@code Long.MAX_VALUE} days).
+     */
     public static final Option INFINITY = new TimeOutOption(MAX_VALUE, DAYS);
 
+    /**
+     * Factory method for creating a timeout option.
+     */
     public static Option timeout(long time, TimeUnit unit) {
         return new TimeOutOption(time, unit);
     }
 
+    // FIXME OAK-4465: Remove the read-only concern from TarRevisions: this should be possible once
+    // the ReadOnlyStore is properly separated from the FileStore. See OAK-4450.
+    /**
+     * Create a new instance placing the journal log file into the passed
+     * {@code directory}.
+     * @param readOnly      safeguard for {@link ReadOnlyStore}: open the journal
+     *                      file in read only mode.
+     * @param directory     directory of the journal file
+     * @throws IOException
+     */
     public TarRevisions(boolean readOnly, @Nonnull File directory)
     throws IOException {
-        this.readOnly = readOnly;
         this.directory = checkNotNull(directory);
         this.journalFile = new RandomAccessFile(new File(directory, JOURNAL_FILE_NAME),
                 readOnly ? "r" : "rw");
@@ -120,18 +140,22 @@ public class TarRevisions implements Revisions, Closeable {
         this.persistedHead = new AtomicReference<>(null);
     }
 
+    /**
+     * Bind this instance to a store.
+     * @param store              store to bind to
+     * @param writeInitialNode   provider for the initial node in case the journal is empty.
+     * @throws IOException
+     */
     synchronized void bind(@Nonnull SegmentStore store,
-                           @Nonnull SegmentTracker tracker,
                            @Nonnull Supplier<RecordId> writeInitialNode)
     throws IOException {
         if (head.get() == null) {
             RecordId persistedId = null;
             try (JournalReader journalReader = new JournalReader(new File(directory, JOURNAL_FILE_NAME))) {
-                Iterator<String> entries = journalReader.iterator();
-                while (persistedId == null && entries.hasNext()) {
-                    String entry = entries.next();
+                while (persistedId == null && journalReader.hasNext()) {
+                    String entry = journalReader.next();
                     try {
-                        RecordId id = RecordId.fromString(tracker, entry);
+                        RecordId id = RecordId.fromString(store, entry);
                         if (store.containsSegment(id.getSegmentId())) {
                             persistedId = id;
                         } else {
@@ -158,6 +182,15 @@ public class TarRevisions implements Revisions, Closeable {
 
     private final Lock flushLock = new ReentrantLock();
 
+    /**
+     * Flush the id of the current head to the journal after a call to
+     * {@code persisted}. This method does nothing and returns immediately if
+     * called concurrently and a call is already in progress.
+     * @param persisted     call back for upstream dependencies to ensure
+     *                      the current head state is actually persisted before
+     *                      its id is written to the head state.
+     * @throws IOException
+     */
     public void flush(@Nonnull Callable<Void> persisted) throws IOException {
         checkBound();
         if (flushLock.tryLock()) {
@@ -188,21 +221,41 @@ public class TarRevisions implements Revisions, Closeable {
         return head.get();
     }
 
+    /**
+     * This implementation blocks if a concurrent call to
+     * {@link #setHead(Function, Option...)} is already in
+     * progress.
+
+     * @param options   none
+     */
     @Override
     public boolean setHead(
-            @Nonnull RecordId base,
+            @Nonnull RecordId expected,
             @Nonnull RecordId head,
             @Nonnull Option... options) {
         checkBound();
         rwLock.readLock().lock();
         try {
             RecordId id = this.head.get();
-            return id.equals(base) && this.head.compareAndSet(id, head);
+            return id.equals(expected) && this.head.compareAndSet(id, head);
         } finally {
             rwLock.readLock().unlock();
         }
     }
 
+    /**
+     * This implementation blocks if a concurrent call is already in progress.
+     * @param newHead  function mapping an record id to the record id to which
+     *                 the current head id should be set. If it returns
+     *                 {@code null} the head remains unchanged and {@code setHead}
+     *                 returns {@code false}.
+
+     * @param options  zero or one timeout options specifying how long to block
+     * @throws InterruptedException
+     * @throws IllegalArgumentException  on any non recognised {@code option}.
+     * @see #timeout(long, TimeUnit)
+     * @see #INFINITY
+     */
     @Override
     public boolean setHead(
             @Nonnull Function<RecordId, RecordId> newHead,
@@ -238,14 +291,12 @@ public class TarRevisions implements Revisions, Closeable {
         }
     }
 
+    /**
+     * Close the underlying journal file.
+     * @throws IOException
+     */
     @Override
     public void close() throws IOException {
         journalFile.close();
-    }
-
-    void setHeadId(@Nonnull RecordId headId) {
-        checkState(readOnly, "Cannot set revision on a writable store");
-        head.set(headId);
-        persistedHead.set(headId);
     }
 }

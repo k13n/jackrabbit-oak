@@ -76,6 +76,7 @@
               org.apache.jackrabbit.oak.spi.commit,
               org.apache.jackrabbit.oak.spi.gc,
               org.apache.jackrabbit.oak.spi.lifecycle,
+              org.apache.jackrabbit.oak.spi.mount,
               org.apache.jackrabbit.oak.spi.query,
               org.apache.jackrabbit.oak.spi.security,
               org.apache.jackrabbit.oak.spi.security.authentication,
@@ -338,7 +339,7 @@
     <dependency>
       <groupId>org.apache.tomcat</groupId>
       <artifactId>tomcat-jdbc</artifactId>
-      <version>7.0.64</version>
+      <version>7.0.69</version>
       <scope>test</scope>
     </dependency>
     <dependency>

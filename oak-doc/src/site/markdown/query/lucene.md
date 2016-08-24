@@ -17,9 +17,6 @@
 
 ## Lucene Index
 
-**Following details are applicable for Oak release 1.0.9 onwards. For pre 1.0
-.9 release refer to [Pre 1.0.9 Lucene documentation](lucene-old.html)**
-
 Oak supports Lucene based indexes to support both property constraint and full
 text constraints. Depending on the configuration a Lucene index can be used
 to evaluate property constraints, full text constraints, path restrictions
@@ -329,6 +326,7 @@ analyzed
     * _//element(*, app:Asset)[jcr:contains(type, 'image')]_
     * _//element(*, app:Asset)[jcr:contains(jcr:content/metadata/@format, 'image')]_
 
+<a name="ordered"></a>
 ordered
 : If the property is to be used in _order by_ clause to perform sorting then
   this should be set to true. This should be set to true only if the property
@@ -337,7 +335,9 @@ ordered
     * _//element(*, app:Asset)[jcr:contains(type, 'image')] order by
     jcr:content/@jcr:lastModified_
 
-  Refer to [Lucene based Sorting][OAK-2196] for more details
+  Refer to [Lucene based Sorting][OAK-2196] for more details. Note that this is 
+  only supported for single value property. Enabling this on multi value property
+  would cause indexing to fail.
 
 type
 : JCR Property type. Can be one of `Date`, `Boolean`, `Double` , `String` or `Long`. Mostly
@@ -463,6 +463,13 @@ Key points to consider while using `excludedPaths`, `includedPaths` and `queryPa
    So only exclude those paths which do not have node matching given nodeType or nodes which
    are known to be not part of any query result
 
+4. Sub-root index definitions (e.g. `/test/oak:index/index-def-node`) -
+   `excludedPaths` and `includedPaths` need to be relative to the path that index is defined
+    for. e.g. if the condition is supposed to be put for `/test/a` where the index definition
+    is at `/test/oak:index/index-def-node` then `/a` needs to be put as value of `excludedPaths`
+    or `includedPaths`. On the other hand, `queryPaths` remains to be an absolute path. So, for
+    the example above, `queryPaths` would get the value `/test/a`.
+
 In most cases use of `queryPaths` would not be required as index definition should not have
 any overlap. 
     
@@ -580,6 +587,20 @@ defaults to 5
 
 #### Analyzers
 
+`@since Oak 1.5.5, 1.4.7`
+Unless custom analyzer is configured (as documented below), in-built analyzer
+can be configured to include original term as well to be indexed. This is
+controlled by setting boolean property `indexOriginalTerm` on analyzers node.
+
+    /oak:index/assetType
+      - jcr:primaryType = "oak:QueryIndexDefinition"
+      - compatVersion = 2
+      - type = "lucene"
+      + analyzers
+        - indexOriginalTerm = true
+
+(See [OAK-4516][OAK-4516] for details)
+
 `@since Oak 1.2.0`
 
 Analyzers can be configured as part of index definition via `analyzers` node.
@@ -659,6 +680,12 @@ Points to note
    query for `range` (due to lower case filter) and won't give the result (as might be
    expected). An easy work-around for this example could be to have lower case mappings
    i.e. just use `domain => range`.
+4. Precedence: Specifying analyzer class directly has precedence over analyzer configuration
+   by composition. If you want to configure analyzers by composition then analyzer class
+   MUST NOT not be specified. In-build analyzer has least precedence and comes into play only
+   if no custom analyzer has been configured. Similary, setting `indexOriginalTerm` on
+   analyzers node to modify behavior of in-built analyzer also works only when no custom
+   analyzer has been configured.
 
 <a name="codec"></a>
 #### Codec
@@ -1596,6 +1623,7 @@ such fields
 [OAK-3367]: https://issues.apache.org/jira/browse/OAK-3367
 [OAK-3994]: https://issues.apache.org/jira/browse/OAK-3394
 [OAK-3981]: https://issues.apache.org/jira/browse/OAK-3981
+[OAK-4516]: https://issues.apache.org/jira/browse/OAK-4516
 [luke]: https://code.google.com/p/luke/
 [tika]: http://tika.apache.org/
 [oak-console]: https://github.com/apache/jackrabbit-oak/tree/trunk/oak-run#console

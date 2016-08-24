@@ -21,7 +21,6 @@ import java.security.acl.Group;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -31,12 +30,12 @@ import javax.annotation.Nullable;
 import com.google.common.base.Function;
 import com.google.common.base.Predicates;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
-import com.google.common.collect.Iterators;
 import org.apache.felix.scr.annotations.Activate;
 import org.apache.felix.scr.annotations.Component;
 import org.apache.felix.scr.annotations.Deactivate;
+import org.apache.felix.scr.annotations.Properties;
+import org.apache.felix.scr.annotations.Property;
 import org.apache.felix.scr.annotations.Service;
 import org.apache.jackrabbit.api.security.principal.PrincipalManager;
 import org.apache.jackrabbit.oak.api.Root;
@@ -51,8 +50,10 @@ import org.apache.jackrabbit.oak.spi.security.SecurityConfiguration;
 import org.apache.jackrabbit.oak.spi.security.SecurityProvider;
 import org.apache.jackrabbit.oak.spi.security.authentication.external.SyncHandler;
 import org.apache.jackrabbit.oak.spi.security.authentication.external.impl.DefaultSyncConfigImpl;
+import org.apache.jackrabbit.oak.spi.security.authentication.external.impl.ExternalIdentityConstants;
 import org.apache.jackrabbit.oak.spi.security.authentication.external.impl.ExternalLoginModuleFactory;
 import org.apache.jackrabbit.oak.spi.security.authentication.external.impl.SyncHandlerMapping;
+import org.apache.jackrabbit.oak.spi.security.principal.EmptyPrincipalProvider;
 import org.apache.jackrabbit.oak.spi.security.principal.PrincipalConfiguration;
 import org.apache.jackrabbit.oak.spi.security.principal.PrincipalManagerImpl;
 import org.apache.jackrabbit.oak.spi.security.principal.PrincipalProvider;
@@ -80,6 +81,12 @@ import org.slf4j.LoggerFactory;
         immediate = true
 )
 @Service({PrincipalConfiguration.class, SecurityConfiguration.class})
+@Properties({
+        @Property(name = ExternalIdentityConstants.PARAM_PROTECT_EXTERNAL_IDS,
+                label = "External Identity Protection",
+                description = "If disabled rep:externalId properties won't be properly protected (backwards compatible behavior). NOTE: for security reasons it is strongly recommend to keep the protection enabled!",
+                boolValue = ExternalIdentityConstants.DEFAULT_PROTECT_EXTERNAL_IDS)
+})
 public class ExternalPrincipalConfiguration extends ConfigurationBase implements PrincipalConfiguration {
 
     private static final Logger log = LoggerFactory.getLogger(ExternalPrincipalConfiguration.class);
@@ -124,13 +131,13 @@ public class ExternalPrincipalConfiguration extends ConfigurationBase implements
     @Nonnull
     @Override
     public RepositoryInitializer getRepositoryInitializer() {
-        return new ExternalIdentityRepositoryInitializer();
+        return new ExternalIdentityRepositoryInitializer(protectedExternalIds());
     }
 
     @Nonnull
     @Override
     public List<? extends ValidatorProvider> getValidators(@Nonnull String workspaceName, @Nonnull Set<Principal> principals, @Nonnull MoveTracker moveTracker) {
-        return ImmutableList.of(new ExternalIdentityValidatorProvider(principals));
+        return ImmutableList.of(new ExternalIdentityValidatorProvider(principals, protectedExternalIds()));
     }
 
     @Nonnull
@@ -170,44 +177,8 @@ public class ExternalPrincipalConfiguration extends ConfigurationBase implements
         return syncConfigTracker != null && syncConfigTracker.isEnabled;
     }
 
-    /**
-     * Implementation of the {@code PrincipalProvider} interface that never
-     * returns any principals.
-     */
-    private static final class EmptyPrincipalProvider implements PrincipalProvider {
-
-        private static final PrincipalProvider INSTANCE = new EmptyPrincipalProvider();
-
-        private EmptyPrincipalProvider() {}
-
-        @Override
-        public Principal getPrincipal(@Nonnull String principalName) {
-            return null;
-        }
-
-        @Nonnull
-        @Override
-        public Set<Group> getGroupMembership(@Nonnull Principal principal) {
-            return ImmutableSet.of();
-        }
-
-        @Nonnull
-        @Override
-        public Set<? extends Principal> getPrincipals(@Nonnull String userID) {
-            return ImmutableSet.of();
-        }
-
-        @Nonnull
-        @Override
-        public Iterator<? extends Principal> findPrincipals(@Nullable String nameHint, int searchType) {
-            return Iterators.emptyIterator();
-        }
-
-        @Nonnull
-        @Override
-        public Iterator<? extends Principal> findPrincipals(int searchType) {
-            return Iterators.emptyIterator();
-        }
+    private boolean protectedExternalIds() {
+        return getParameters().getConfigValue(ExternalIdentityConstants.PARAM_PROTECT_EXTERNAL_IDS, ExternalIdentityConstants.DEFAULT_PROTECT_EXTERNAL_IDS);
     }
 
     /**

@@ -16,6 +16,10 @@
  */
 package org.apache.jackrabbit.oak.plugins.document;
 
+import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
+import org.apache.jackrabbit.oak.spi.commit.EmptyHook;
+import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
+import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.junit.Rule;
 import org.junit.Test;
 
@@ -31,6 +35,19 @@ public class DocumentNodeStateTest {
         DocumentNodeStore store = builderProvider.newBuilder().getNodeStore();
         RevisionVector rv = new RevisionVector(Revision.newRevision(1));
         DocumentNodeState state = new DocumentNodeState(store, "/foo", rv);
-        assertEquals(232, state.getMemory());
+        assertEquals(164, state.getMemory());
+    }
+
+    @Test
+    public void propertyCount() throws Exception{
+        DocumentNodeStore store = builderProvider.newBuilder().getNodeStore();
+        NodeBuilder builder = store.getRoot().builder();
+        builder.child("a").setProperty("x", 1);
+        builder.child("a").setProperty("y", 1);
+        store.merge(builder, EmptyHook.INSTANCE, CommitInfo.EMPTY);
+
+        NodeState ns = store.getRoot().getChildNode("a");
+        assertEquals(2, ns.getPropertyCount());
+
     }
 }

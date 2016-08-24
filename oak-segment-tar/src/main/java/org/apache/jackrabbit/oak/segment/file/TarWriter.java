@@ -22,14 +22,9 @@ import static com.google.common.base.Charsets.UTF_8;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkPositionIndexes;
 import static com.google.common.base.Preconditions.checkState;
-import static com.google.common.collect.Lists.newArrayList;
-import static com.google.common.collect.Lists.reverse;
 import static com.google.common.collect.Maps.newHashMap;
 import static com.google.common.collect.Maps.newLinkedHashMap;
-import static com.google.common.collect.Maps.newTreeMap;
 import static com.google.common.collect.Sets.newHashSet;
-import static org.apache.jackrabbit.oak.segment.Segment.REF_COUNT_OFFSET;
-import static org.apache.jackrabbit.oak.segment.SegmentId.isDataSegmentId;
 
 import java.io.Closeable;
 import java.io.File;
@@ -39,15 +34,13 @@ import java.io.RandomAccessFile;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.util.Arrays;
-import java.util.Collections;
-import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Set;
-import java.util.SortedMap;
 import java.util.UUID;
 import java.util.zip.CRC32;
 
-import com.google.common.collect.Lists;
+import com.google.common.base.Charsets;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -96,6 +89,11 @@ class TarWriter implements Closeable {
     static final int GRAPH_MAGIC =
             ('\n' << 24) + ('0' << 16) + ('G' << 8) + '\n';
 
+    /**
+     * Magic sequence at the end of the binary references block.
+     */
+    static final int BINARY_REFERENCES_MAGIC = ('\n' << 24) + ('0' << 16) + ('B' << 8) + '\n';
+
     /** The tar file block size. */
     static final int BLOCK_SIZE = 512;
 
@@ -122,7 +120,7 @@ class TarWriter implements Closeable {
 
     /**
      * File handle. Initialized lazily in
-     * {@link #writeEntry(long, long, byte[], int, int)} to avoid creating
+     * {@link #writeEntry(long, long, byte[], int, int, int)} to avoid creating
      * an extra empty file when just reading from the repository.
      * Should only be accessed from synchronized code.
      */
@@ -147,12 +145,15 @@ class TarWriter implements Closeable {
      */
     private final Map<UUID, TarEntry> index = newLinkedHashMap();
 
-    private final Set<UUID> references = newHashSet();
+    /**
+     * List of binary references contained in this TAR file.
+     */
+    private final Map<Integer, Map<UUID, Set<String>>> binaryReferences = newHashMap();
 
     /**
-     * Segment graph of the entries that have already been written.
+     * Graph of references between segments.
      */
-    private final SortedMap<UUID, List<UUID>> graph = newTreeMap();
+    private final Map<UUID, Set<UUID>> graph = newHashMap();
 
     TarWriter(File file) {
         this(file, FileStoreMonitor.DEFAULT);
@@ -247,29 +248,37 @@ class TarWriter implements Closeable {
                 (int) (currentLength - size - padding), size, generation);
         index.put(uuid, entry);
 
-        if (isDataSegmentId(uuid.getLeastSignificantBits())) {
-            ByteBuffer segment = ByteBuffer.wrap(data, offset, size);
-            int pos = segment.position();
-            int refcount = segment.get(pos + REF_COUNT_OFFSET) & 0xff;
-            if (refcount != 0) {
-                int refend = pos + 16 * (refcount + 1);
-                List<UUID> list = Lists.newArrayListWithCapacity(refcount);
-                for (int refpos = pos + 16; refpos < refend; refpos += 16) {
-                    UUID refid = new UUID(
-                            segment.getLong(refpos),
-                            segment.getLong(refpos + 8));
-                    if (!index.containsKey(refid)) {
-                        references.add(refid);
-                    }
-                    list.add(refid);
-                }
-                Collections.sort(list);
-                graph.put(uuid, list);
-            }
-        }
-
         monitor.written(currentLength - initialLength);
         return currentLength;
+    }
+
+    void addBinaryReference(int generation, UUID segmentId, String reference) {
+        Map<UUID, Set<String>> segmentToReferences = binaryReferences.get(generation);
+
+        if (segmentToReferences == null) {
+            segmentToReferences = newHashMap();
+            binaryReferences.put(generation, segmentToReferences);
+        }
+
+        Set<String> references = segmentToReferences.get(segmentId);
+
+        if (references == null) {
+            references = newHashSet();
+            segmentToReferences.put(segmentId, references);
+        }
+
+        references.add(reference);
+    }
+
+    void addGraphEdge(UUID from, UUID to) {
+        Set<UUID> adj = graph.get(from);
+
+        if (adj == null) {
+            adj = newHashSet();
+            graph.put(from, adj);
+        }
+
+        adj.add(to);
     }
 
     /**
@@ -328,6 +337,7 @@ class TarWriter implements Closeable {
         long initialPosition, currentPosition;
         synchronized (file) {
             initialPosition = access.getFilePointer();
+            writeBinaryReferences();
             writeGraph();
             writeIndex();
             access.write(ZERO_BYTES);
@@ -340,53 +350,168 @@ class TarWriter implements Closeable {
         monitor.written(currentPosition - initialPosition);
     }
 
-    private void writeGraph() throws IOException {
-        List<UUID> uuids = Lists.newArrayListWithCapacity(
-                index.size() + references.size());
-        uuids.addAll(index.keySet());
-        uuids.addAll(references);
-        Collections.sort(uuids);
+    private void writeBinaryReferences() throws IOException {
+        int binaryReferenceSize = 0;
 
-        int graphSize = uuids.size() * 16 + 16;
-        for (List<UUID> list : graph.values()) {
-            graphSize += 4 + list.size() * 4 + 4;
-        }
-        int padding = getPaddingSize(graphSize);
+        // The following information are stored in the footer as meta-
+        // information about the entry.
 
-        String graphName = file.getName() + ".gph";
-        byte[] header = newEntryHeader(graphName, graphSize + padding);
+        // 4 bytes to store a magic number identifying this entry as containing
+        // references to binary values.
+        binaryReferenceSize += 4;
 
-        ByteBuffer buffer = ByteBuffer.allocate(graphSize);
+        // 4 bytes to store the CRC32 checksum of the data in this entry.
+        binaryReferenceSize += 4;
 
-        Map<UUID, Integer> refmap = newHashMap();
+        // 4 bytes to store the length of this entry, without including the
+        // optional padding.
+        binaryReferenceSize += 4;
 
-        int index = 0;
-        for (UUID uuid : uuids) {
-            buffer.putLong(uuid.getMostSignificantBits());
-            buffer.putLong(uuid.getLeastSignificantBits());
-            refmap.put(uuid, index++);
-        }
+        // 4 bytes to store the number of generations pairs in the binary
+        // references map.
+        binaryReferenceSize += 4;
 
-        for (Map.Entry<UUID, List<UUID>> entry : graph.entrySet()) {
-            buffer.putInt(refmap.get(entry.getKey()));
-            for (UUID refid : entry.getValue()) {
-                buffer.putInt(refmap.get(refid));
+        // The following information are stored as part of the main content of
+        // this entry, after the optional padding.
+
+        for (Map<UUID, Set<String>> segmentToReferences : binaryReferences.values()) {
+            // 4 bytes per generation to store the generation number itself.
+            binaryReferenceSize += 4;
+
+            // 4 bytes per generation to store the number of segments.
+            binaryReferenceSize += 4;
+
+            for (Set<String> references : segmentToReferences.values()) {
+                // 16 bytes per segment identifier.
+                binaryReferenceSize += 16;
+
+                // 4 bytes to store the number of references for this segment.
+                binaryReferenceSize += 4;
+
+                for (String reference : references) {
+                    // 4 bytes for each reference to store the length of the reference.
+                    binaryReferenceSize += 4;
+
+                    // A variable amount of bytes, depending on the reference itself.
+                    binaryReferenceSize += reference.getBytes(Charsets.UTF_8).length;
+                }
             }
-            buffer.putInt(-1);
+        }
+
+        ByteBuffer buffer = ByteBuffer.allocate(binaryReferenceSize);
+
+        for (Entry<Integer, Map<UUID, Set<String>>> be : binaryReferences.entrySet()) {
+            int generation = be.getKey();
+            Map<UUID, Set<String>> segmentToReferences = be.getValue();
+
+            buffer.putInt(generation);
+            buffer.putInt(segmentToReferences.size());
+
+            for (Entry<UUID, Set<String>> se : segmentToReferences.entrySet()) {
+                UUID segmentId = se.getKey();
+                Set<String> references = se.getValue();
+
+                buffer.putLong(segmentId.getMostSignificantBits());
+                buffer.putLong(segmentId.getLeastSignificantBits());
+                buffer.putInt(references.size());
+
+                for (String reference : references) {
+                    byte[] bytes = reference.getBytes(Charsets.UTF_8);
+
+                    buffer.putInt(bytes.length);
+                    buffer.put(bytes);
+                }
+            }
         }
 
         CRC32 checksum = new CRC32();
         checksum.update(buffer.array(), 0, buffer.position());
         buffer.putInt((int) checksum.getValue());
-        buffer.putInt(uuids.size());
+        buffer.putInt(binaryReferences.size());
+        buffer.putInt(binaryReferenceSize);
+        buffer.putInt(BINARY_REFERENCES_MAGIC);
+
+        int paddingSize = getPaddingSize(binaryReferenceSize);
+
+        byte[] header = newEntryHeader(file.getName() + ".brf", binaryReferenceSize + paddingSize);
+
+        access.write(header);
+
+        if (paddingSize > 0) {
+            access.write(ZERO_BYTES, 0, paddingSize);
+        }
+
+        access.write(buffer.array());
+    }
+
+    private void writeGraph() throws IOException {
+        int graphSize = 0;
+
+        // The following information are stored in the footer as meta-
+        // information about the entry.
+
+        // 4 bytes to store a magic number identifying this entry as containing
+        // references to binary values.
+        graphSize += 4;
+
+        // 4 bytes to store the CRC32 checksum of the data in this entry.
+        graphSize += 4;
+
+        // 4 bytes to store the length of this entry, without including the
+        // optional padding.
+        graphSize += 4;
+
+        // 4 bytes to store the number of entries in the graph map.
+        graphSize += 4;
+
+        // The following information are stored as part of the main content of
+        // this entry, after the optional padding.
+
+        for (Entry<UUID, Set<UUID>> entry : graph.entrySet()) {
+            // 16 bytes to store the key of the map.
+            graphSize += 16;
+
+            // 4 bytes for the number of entries in the adjacency list.
+            graphSize += 4;
+
+            // 16 bytes for every element in the adjacency list.
+            graphSize += 16 * entry.getValue().size();
+        }
+
+        ByteBuffer buffer = ByteBuffer.allocate(graphSize);
+
+        for (Entry<UUID, Set<UUID>> entry : graph.entrySet()) {
+            UUID from = entry.getKey();
+
+            buffer.putLong(from.getMostSignificantBits());
+            buffer.putLong(from.getLeastSignificantBits());
+
+            Set<UUID> adj = entry.getValue();
+
+            buffer.putInt(adj.size());
+
+            for (UUID to : adj) {
+                buffer.putLong(to.getMostSignificantBits());
+                buffer.putLong(to.getLeastSignificantBits());
+            }
+        }
+
+        CRC32 checksum = new CRC32();
+        checksum.update(buffer.array(), 0, buffer.position());
+
+        buffer.putInt((int) checksum.getValue());
+        buffer.putInt(graph.size());
         buffer.putInt(graphSize);
         buffer.putInt(GRAPH_MAGIC);
 
-        access.write(header);
+        int padding = getPaddingSize(graphSize);
+
+        access.write(newEntryHeader(file.getName() + ".gph", graphSize + padding));
+
         if (padding > 0) {
-            // padding comes *before* the graph!
             access.write(ZERO_BYTES, 0, padding);
         }
+
         access.write(buffer.array());
     }
 

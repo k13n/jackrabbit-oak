@@ -28,6 +28,8 @@ public interface LuceneIndexConstants {
 
     String INDEX_DATA_CHILD_NAME = ":data";
 
+    String SUGGEST_DATA_CHILD_NAME = ":suggest-data";
+
     String TRASH_CHILD_NAME = ":trash";
 
     Version VERSION = Version.LUCENE_47;
@@ -51,8 +53,6 @@ public interface LuceneIndexConstants {
     String PERSISTENCE_FILE = "file";
 
     String PERSISTENCE_PATH = "path";
-
-    String INDEX_DATA_CHILD_NAME_FS = "data";
 
     /**
      * Experimental flag to control storage behavior: 'null' or 'true' means the content is stored
@@ -196,6 +196,14 @@ public interface LuceneIndexConstants {
     String COST_PER_EXECUTION = "costPerExecution";
 
     /**
+     * Boolean property indicating if in-built analyzer should preserve original term
+     * (i.e. use
+     * {@link org.apache.lucene.analysis.miscellaneous.WordDelimiterFilter#PRESERVE_ORIGINAL}
+     * flag)
+     */
+    String INDEX_ORIGINAL_TERM = "indexOriginalTerm";
+
+    /**
      * Node name under which various analyzers are configured
      */
     String ANALYZERS = "analyzers";
@@ -228,12 +236,14 @@ public interface LuceneIndexConstants {
      * The maximum number of terms that will be indexed for a single field in a
      * document.  This limits the amount of memory required for indexing, so that
      * collections with very large files will not crash the indexing process by
-     * running out of memory.<p/>
+     * running out of memory.
+     * <p>
      * Note that this effectively truncates large documents, excluding from the
      * index terms that occur further in the document.  If you know your source
      * documents are large, be sure to set this value high enough to accommodate
      * the expected size.  If you set it to Integer.MAX_VALUE, then the only limit
-     * is your memory, but you should anticipate an OutOfMemoryError.<p/>
+     * is your memory, but you should anticipate an OutOfMemoryError.
+     * <p>
      * By default, no more than 10,000 terms will be indexed for a field.
      */
     String MAX_FIELD_LENGTH = "maxFieldLength";

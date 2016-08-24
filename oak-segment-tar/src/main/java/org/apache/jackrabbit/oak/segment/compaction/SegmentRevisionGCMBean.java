@@ -21,6 +21,7 @@ package org.apache.jackrabbit.oak.segment.compaction;
 
 import org.apache.jackrabbit.oak.commons.jmx.AnnotatedStandardMBean;
 
+// FIXME OAK-4617: Align SegmentRevisionGC MBean with new generation based GC
 public class SegmentRevisionGCMBean
         extends AnnotatedStandardMBean
         implements SegmentRevisionGC {
@@ -101,4 +102,15 @@ public class SegmentRevisionGCMBean
     public void setRetainedGenerations(int retainedGenerations) {
         gcOptions.setRetainedGenerations(retainedGenerations);
     }
+
+    @Override
+    public long getGcSizeDeltaEstimation() {
+        return gcOptions.getGcSizeDeltaEstimation();
+    }
+
+    @Override
+    public void setGcSizeDeltaEstimation(long gcSizeDeltaEstimation) {
+        gcOptions.setGcSizeDeltaEstimation(gcSizeDeltaEstimation);
+    }
+
 }

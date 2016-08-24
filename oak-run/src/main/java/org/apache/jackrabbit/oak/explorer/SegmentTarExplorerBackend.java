@@ -21,6 +21,7 @@ import static com.google.common.collect.Lists.newArrayList;
 import static com.google.common.collect.Sets.newHashSet;
 import static java.util.Collections.reverseOrder;
 import static java.util.Collections.sort;
+import static org.apache.jackrabbit.oak.segment.file.FileStoreBuilder.fileStoreBuilder;
 
 import java.io.File;
 import java.io.IOException;
@@ -60,7 +61,7 @@ class SegmentTarExplorerBackend implements ExplorerBackend {
 
     @Override
     public void open() throws IOException {
-        store = FileStore.builder(path).buildReadOnly();
+        store = fileStoreBuilder(path).buildReadOnly();
         index = store.getTarReaderIndex();
     }
 
@@ -86,7 +87,7 @@ class SegmentTarExplorerBackend implements ExplorerBackend {
             journalReader = new JournalReader(journal);
 
             try {
-                revs = newArrayList(journalReader.iterator());
+                revs = newArrayList(journalReader);
             } finally {
                 journalReader.close();
             }
@@ -169,12 +170,12 @@ class SegmentTarExplorerBackend implements ExplorerBackend {
 
     @Override
     public NodeState getHead() {
-        return store.getReader().readHeadState();
+        return store.getHead();
     }
 
     @Override
     public NodeState readNodeState(String recordId) {
-        return store.getReader().readNode(RecordId.fromString(store.getTracker(), recordId));
+        return store.getReader().readNode(RecordId.fromString(store, recordId));
     }
 
     @Override

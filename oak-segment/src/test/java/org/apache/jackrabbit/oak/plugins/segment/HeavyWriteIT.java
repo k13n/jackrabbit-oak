@@ -60,7 +60,7 @@ public class HeavyWriteIT {
     private final boolean usePersistedMap;
 
     @Rule
-    public TemporaryFolder folder = new TemporaryFolder();
+    public TemporaryFolder folder = new TemporaryFolder(new File("target"));
 
     private File getFileStoreFolder() {
         return folder.getRoot();
@@ -82,7 +82,7 @@ public class HeavyWriteIT {
     }
 
     @Test
-    public void heavyWrite() throws IOException, CommitFailedException, InterruptedException {
+    public void heavyWrite() throws Exception {
         final FileStore store = FileStore.builder(getFileStoreFolder()).withMaxFileSize(128).withMemoryMapping(false).build();
         final SegmentNodeStore nodeStore = SegmentNodeStore.builder(store).build();
         CompactionStrategy custom = new CompactionStrategy(false, false,

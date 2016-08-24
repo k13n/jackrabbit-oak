@@ -32,7 +32,8 @@ import static org.apache.jackrabbit.oak.segment.SegmentGraph.writeGCGraph;
 import static org.apache.jackrabbit.oak.segment.SegmentGraph.writeSegmentGraph;
 import static org.apache.jackrabbit.oak.segment.SegmentNodeStateHelper.getTemplateId;
 import static org.apache.jackrabbit.oak.segment.SegmentVersion.LATEST_VERSION;
-import static org.apache.jackrabbit.oak.segment.compaction.SegmentGCOptions.DEFAULT;
+import static org.apache.jackrabbit.oak.segment.compaction.SegmentGCOptions.defaultGCOptions;
+import static org.apache.jackrabbit.oak.segment.file.FileStoreBuilder.fileStoreBuilder;
 import static org.apache.jackrabbit.oak.segment.file.tooling.ConsistencyChecker.checkConsistency;
 import static org.slf4j.LoggerFactory.getLogger;
 
@@ -42,7 +43,6 @@ import java.io.OutputStream;
 import java.io.PrintWriter;
 import java.io.RandomAccessFile;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashSet;
@@ -62,13 +62,11 @@ import ch.qos.logback.classic.Logger;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Queues;
 import com.google.common.io.Closer;
-import org.apache.commons.io.FileUtils;
 import org.apache.jackrabbit.oak.api.Blob;
 import org.apache.jackrabbit.oak.api.PropertyState;
 import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.backup.FileStoreBackup;
 import org.apache.jackrabbit.oak.backup.FileStoreRestore;
-import org.apache.jackrabbit.oak.commons.IOUtils;
 import org.apache.jackrabbit.oak.commons.PathUtils;
 import org.apache.jackrabbit.oak.commons.json.JsopBuilder;
 import org.apache.jackrabbit.oak.json.JsopDiff;
@@ -87,10 +85,11 @@ import org.apache.jackrabbit.oak.segment.SegmentReader;
 import org.apache.jackrabbit.oak.segment.SegmentTracker;
 import org.apache.jackrabbit.oak.segment.SegmentVersion;
 import org.apache.jackrabbit.oak.segment.file.FileStore;
-import org.apache.jackrabbit.oak.segment.file.FileStore.Builder;
+import org.apache.jackrabbit.oak.segment.file.FileStoreBuilder;
 import org.apache.jackrabbit.oak.segment.file.FileStore.ReadOnlyStore;
 import org.apache.jackrabbit.oak.segment.file.JournalReader;
 import org.apache.jackrabbit.oak.segment.file.tooling.RevisionHistory;
+import org.apache.jackrabbit.oak.segment.file.tooling.RevisionHistory.HistoryElement;
 import org.apache.jackrabbit.oak.spi.blob.BlobStore;
 import org.apache.jackrabbit.oak.spi.state.ChildNodeEntry;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
@@ -126,8 +125,7 @@ final class SegmentTarUtils {
                 fs = openReadOnlyFileStore(source);
             }
             closer.register(fs);
-            NodeStore store = SegmentNodeStoreBuilders.builder(fs).build();
-            FileStoreBackup.backup(store, target);
+            FileStoreBackup.backup(fs.getReader(), fs.getRevisions(), target);
         } catch (Throwable e) {
             throw closer.rethrow(e);
         } finally {
@@ -169,8 +167,9 @@ final class SegmentTarUtils {
     }
 
     static void history(File directory, File journal, String path, int depth) throws IOException {
-        Iterable<RevisionHistory.HistoryElement> history = new RevisionHistory(directory).getHistory(journal, path);
-        for (RevisionHistory.HistoryElement historyElement : history) {
+        Iterator<HistoryElement> history = new RevisionHistory(directory).getHistory(journal, path);
+        while (history.hasNext()) {
+            RevisionHistory.HistoryElement historyElement = history.next();
             System.out.println(historyElement.toString(depth));
         }
     }
@@ -181,15 +180,8 @@ final class SegmentTarUtils {
 
     static void compact(File directory, boolean force) throws IOException {
         FileStore store = newFileStoreBuilder(directory.getAbsolutePath(),
-                force).withGCOptions(DEFAULT.setOffline()).build();
+                force).withGCOptions(defaultGCOptions().setOffline()).build();
         try {
-            System.out.println("Compacting " + directory);
-            System.out.println("    before " + Arrays.toString(directory.list()));
-            long sizeBefore = FileUtils.sizeOfDirectory(directory);
-            System.out.println("    size "
-                    + IOUtils.humanReadableByteCount(sizeBefore) + " (" + sizeBefore
-                    + " bytes)");
-            System.out.println("    -> compacting");
             store.compact();
         } finally {
             store.close();
@@ -197,7 +189,7 @@ final class SegmentTarUtils {
 
         System.out.println("    -> cleaning up");
         store = newFileStoreBuilder(directory.getAbsolutePath(), force)
-                .withGCOptions(DEFAULT.setOffline()).build();
+                .withGCOptions(defaultGCOptions().setOffline()).build();
         try {
             for (File file : store.cleanup()) {
                 if (!file.exists() || file.delete()) {
@@ -211,7 +203,7 @@ final class SegmentTarUtils {
             File journal = new File(directory, "journal.log");
             JournalReader journalReader = new JournalReader(journal);
             try {
-                head = journalReader.iterator().next() + " root " + System.currentTimeMillis() + "\n";
+                head = journalReader.next() + " root " + System.currentTimeMillis() + "\n";
             } finally {
                 journalReader.close();
             }
@@ -243,7 +235,7 @@ final class SegmentTarUtils {
     }
 
     private static FileStore bootstrapFileStore(String path) throws IOException {
-        return FileStore.builder(new File(path)).build();
+        return fileStoreBuilder(new File(path)).build();
     }
 
     private static void listRevs(File store, File out) throws IOException {
@@ -275,7 +267,7 @@ final class SegmentTarUtils {
         try {
             journalReader = new JournalReader(journal);
             try {
-                revs = newArrayList(journalReader.iterator());
+                revs = newArrayList(journalReader);
             } finally {
                 journalReader.close();
             }
@@ -301,19 +293,19 @@ final class SegmentTarUtils {
                     + "'.");
             return;
         }
-        ReadOnlyStore store = FileStore.builder(dir).withBlobStore(newBasicReadOnlyBlobStore()).buildReadOnly();
+        ReadOnlyStore store = fileStoreBuilder(dir).withBlobStore(newBasicReadOnlyBlobStore()).buildReadOnly();
         RecordId idL = null;
         RecordId idR = null;
         try {
             if (tokens[0].equalsIgnoreCase("head")) {
                 idL = store.getRevisions().getHead();
             } else {
-                idL = fromString(store.getTracker(), tokens[0]);
+                idL = fromString(store, tokens[0]);
             }
             if (tokens[1].equalsIgnoreCase("head")) {
                 idR = store.getRevisions().getHead();
             } else {
-                idR = fromString(store.getTracker(), tokens[1]);
+                idR = fromString(store, tokens[1]);
             }
         } catch (IllegalArgumentException ex) {
             System.out.println("Error parsing revision interval '" + interval + "': " + ex.getMessage());
@@ -344,9 +336,9 @@ final class SegmentTarUtils {
                     return;
                 }
                 Iterator<String> revDiffsIt = revDiffs.iterator();
-                RecordId idLt = fromString(store.getTracker(), revDiffsIt.next());
+                RecordId idLt = fromString(store, revDiffsIt.next());
                 while (revDiffsIt.hasNext()) {
-                    RecordId idRt = fromString(store.getTracker(), revDiffsIt.next());
+                    RecordId idRt = fromString(store, revDiffsIt.next());
                     boolean good = diff(store, idLt, idRt, filter, pw);
                     idLt = idRt;
                     if (!good && !ignoreSNFEs) {
@@ -483,7 +475,7 @@ final class SegmentTarUtils {
             if (hasrefs) {
                 System.out.println("SegmentNodeState references to " + f);
                 List<String> paths = new ArrayList<String>();
-                filterNodeStates(uuids, paths, store.getReader().readHeadState(), "/");
+                filterNodeStates(uuids, paths, store.getHead(), "/");
                 for (String p : paths) {
                     System.out.println("  " + p);
                 }
@@ -585,7 +577,7 @@ final class SegmentTarUtils {
                 System.err.println("Unknown argument: " + args[i]);
             } else if (matcher.group(1) != null) {
                 UUID uuid = UUID.fromString(matcher.group(1));
-                SegmentId id = store.getTracker().getSegmentId(
+                SegmentId id = store.newSegmentId(
                         uuid.getMostSignificantBits(),
                         uuid.getLeastSignificantBits());
                 System.out.println(id.getSegment());
@@ -593,10 +585,10 @@ final class SegmentTarUtils {
                 RecordId id1 = store.getRevisions().getHead();
                 RecordId id2 = null;
                 if (matcher.group(2) != null) {
-                    id1 = fromString(store.getTracker(),
+                    id1 = fromString(store,
                             matcher.group(3));
                     if (matcher.group(4) != null) {
-                        id2 = fromString(store.getTracker(),
+                        id2 = fromString(store,
                                 matcher.group(5));
                     }
                 }
@@ -632,24 +624,24 @@ final class SegmentTarUtils {
     }
 
     private static FileStore openReadOnlyFileStore(File path, BlobStore blobStore) throws IOException {
-        return FileStore.builder(isValidFileStoreOrFail(path))
-                .withCacheSize(TAR_SEGMENT_CACHE_SIZE)
+        return fileStoreBuilder(isValidFileStoreOrFail(path))
+                .withSegmentCacheSize(TAR_SEGMENT_CACHE_SIZE)
                 .withMemoryMapping(TAR_STORAGE_MEMORY_MAPPED)
                 .withBlobStore(blobStore)
                 .buildReadOnly();
     }
 
     private static ReadOnlyStore openReadOnlyFileStore(File path) throws IOException {
-        return FileStore.builder(isValidFileStoreOrFail(path))
-                .withCacheSize(TAR_SEGMENT_CACHE_SIZE)
+        return fileStoreBuilder(isValidFileStoreOrFail(path))
+                .withSegmentCacheSize(TAR_SEGMENT_CACHE_SIZE)
                 .withMemoryMapping(TAR_STORAGE_MEMORY_MAPPED)
                 .buildReadOnly();
     }
 
-    private static Builder newFileStoreBuilder(String directory, boolean force)
+    private static FileStoreBuilder newFileStoreBuilder(String directory, boolean force)
             throws IOException {
-        return FileStore.builder(checkFileStoreVersionOrFail(directory, force))
-                .withCacheSize(TAR_SEGMENT_CACHE_SIZE)
+        return fileStoreBuilder(checkFileStoreVersionOrFail(directory, force))
+                .withSegmentCacheSize(TAR_SEGMENT_CACHE_SIZE)
                 .withMemoryMapping(TAR_STORAGE_MEMORY_MAPPED);
     }
 

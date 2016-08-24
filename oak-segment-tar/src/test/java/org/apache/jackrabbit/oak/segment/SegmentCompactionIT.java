@@ -32,11 +32,15 @@ import static java.lang.System.getProperty;
 import static java.util.concurrent.TimeUnit.MINUTES;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.apache.commons.lang.RandomStringUtils.randomAlphabetic;
+import static org.apache.jackrabbit.oak.segment.compaction.SegmentGCOptions.defaultGCOptions;
+import static org.apache.jackrabbit.oak.segment.file.FileStoreBuilder.fileStoreBuilder;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assume.assumeTrue;
 import static org.slf4j.helpers.MessageFormatter.arrayFormat;
 import static org.slf4j.helpers.MessageFormatter.format;
 
 import java.io.ByteArrayInputStream;
+import java.io.File;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
@@ -48,6 +52,8 @@ import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReadWriteLock;
@@ -56,7 +62,6 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 import javax.management.InstanceAlreadyExistsException;
 import javax.management.MBeanRegistrationException;
 import javax.management.MBeanServer;
-import javax.management.MalformedObjectNameException;
 import javax.management.NotCompliantMBeanException;
 import javax.management.ObjectName;
 
@@ -68,7 +73,7 @@ import com.google.common.util.concurrent.ListeningScheduledExecutorService;
 import org.apache.jackrabbit.oak.api.Blob;
 import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.api.PropertyState;
-import org.apache.jackrabbit.oak.cache.CacheStats;
+import org.apache.jackrabbit.oak.api.jmx.CacheStatsMBean;
 import org.apache.jackrabbit.oak.commons.jmx.AnnotatedStandardMBean;
 import org.apache.jackrabbit.oak.plugins.commit.ConflictHook;
 import org.apache.jackrabbit.oak.plugins.commit.DefaultConflictHandler;
@@ -88,6 +93,7 @@ import org.apache.jackrabbit.oak.spi.state.NodeStore;
 import org.apache.jackrabbit.oak.spi.whiteboard.CompositeRegistration;
 import org.apache.jackrabbit.oak.spi.whiteboard.Registration;
 import org.apache.jackrabbit.oak.stats.Clock;
+import org.apache.jackrabbit.oak.stats.DefaultStatisticsProvider;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
@@ -158,7 +164,7 @@ public class SegmentCompactionIT {
     private volatile long fileStoreSize;
 
     @Rule
-    public TemporaryFolder folder = new TemporaryFolder();
+    public TemporaryFolder folder = new TemporaryFolder(new File("target"));
 
     public synchronized void stop() {
         stopping = true;
@@ -213,27 +219,19 @@ public class SegmentCompactionIT {
     }
 
     @Before
-    public void setUp() throws IOException, MalformedObjectNameException, NotCompliantMBeanException,
-            InstanceAlreadyExistsException, MBeanRegistrationException {
+    public void setUp() throws Exception {
         assumeTrue(ENABLED);
 
-        scheduler.scheduleAtFixedRate(new Runnable() {
-            @Override
-            public void run() {
-                fileStoreGCMonitor.run();
-            }
-        }, 1, 1, SECONDS);
-
-        SegmentGCOptions gcOptions = SegmentGCOptions.DEFAULT.setLockWaitTime(lockWaitTime);
-        fileStore = FileStore.builder(folder.getRoot())
+        SegmentGCOptions gcOptions = defaultGCOptions().setLockWaitTime(lockWaitTime);
+        ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
+        fileStore = fileStoreBuilder(folder.getRoot())
                 .withMemoryMapping(true)
                 .withGCMonitor(gcMonitor)
                 .withGCOptions(gcOptions)
+                .withStatisticsProvider(new DefaultStatisticsProvider(executor))
                 .build();
         nodeStore = SegmentNodeStoreBuilders.builder(fileStore).build();
 
-        CacheStats segmentCacheStats = fileStore.getSegmentCacheStats();
-        CacheStats stringCacheStats = fileStore.getStringCacheStats();
         List<Registration> registrations = newArrayList();
         registrations.add(registerMBean(segmentCompactionMBean,
                 new ObjectName("IT:TYPE=Segment Compaction")));
@@ -241,11 +239,27 @@ public class SegmentCompactionIT {
                 new ObjectName("IT:TYPE=Segment Revision GC")));
         registrations.add(registerMBean(fileStoreGCMonitor,
                 new ObjectName("IT:TYPE=GC Monitor")));
-        registrations.add(registerMBean(segmentCacheStats, new ObjectName("IT:TYPE=" + segmentCacheStats.getName())));
-        if (stringCacheStats != null) {
-            registrations.add(registerMBean(stringCacheStats,
-                    new ObjectName("IT:TYPE=" + stringCacheStats.getName())));
-        }
+        CacheStatsMBean segmentCacheStats = fileStore.getSegmentCacheStats();
+        registrations.add(registerMBean(segmentCacheStats,
+                new ObjectName("IT:TYPE=" + segmentCacheStats.getName())));
+        CacheStatsMBean stringCacheStats = fileStore.getStringCacheStats();
+        registrations.add(registerMBean(stringCacheStats,
+                new ObjectName("IT:TYPE=" + stringCacheStats.getName())));
+        CacheStatsMBean templateCacheStats = fileStore.getTemplateCacheStats();
+        registrations.add(registerMBean(templateCacheStats,
+                new ObjectName("IT:TYPE=" + templateCacheStats.getName())));
+        CacheStatsMBean stringDeduplicationCacheStats = fileStore.getStringDeduplicationCacheStats();
+        assertNotNull(stringDeduplicationCacheStats);
+        registrations.add(registerMBean(stringDeduplicationCacheStats,
+                new ObjectName("IT:TYPE=" + stringDeduplicationCacheStats.getName())));
+        CacheStatsMBean templateDeduplicationCacheStats = fileStore.getTemplateDeduplicationCacheStats();
+        assertNotNull(templateDeduplicationCacheStats);
+        registrations.add(registerMBean(templateDeduplicationCacheStats,
+                new ObjectName("IT:TYPE=" + templateDeduplicationCacheStats.getName())));
+        CacheStatsMBean nodeDeduplicationCacheStats = fileStore.getNodeDeduplicationCacheStats();
+        assertNotNull(nodeDeduplicationCacheStats);
+        registrations.add(registerMBean(nodeDeduplicationCacheStats,
+                new ObjectName("IT:TYPE=" + nodeDeduplicationCacheStats.getName())));
         mBeanRegistration = new CompositeRegistration(registrations);
     }
 
@@ -281,7 +295,7 @@ public class SegmentCompactionIT {
         scheduler.scheduleAtFixedRate(new Runnable() {
             @Override
             public void run() {
-                fileStoreSize = fileStore.size();
+                fileStoreSize = fileStore.getStats().getApproximateSize();
             }
         }, 1, 1, MINUTES);
     }

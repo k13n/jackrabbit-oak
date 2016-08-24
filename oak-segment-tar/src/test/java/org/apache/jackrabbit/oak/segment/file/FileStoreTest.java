@@ -19,8 +19,9 @@
 
 package org.apache.jackrabbit.oak.segment.file;
 
+import static org.apache.jackrabbit.oak.segment.file.FileStoreBuilder.fileStoreBuilder;
+
 import java.io.File;
-import java.io.IOException;
 
 import org.apache.jackrabbit.oak.segment.SegmentId;
 import org.junit.Rule;
@@ -30,15 +31,15 @@ import org.junit.rules.TemporaryFolder;
 public class FileStoreTest {
 
     @Rule
-    public TemporaryFolder folder = new TemporaryFolder();
+    public TemporaryFolder folder = new TemporaryFolder(new File("target"));
 
     private File getFileStoreFolder() {
         return folder.getRoot();
     }
 
     @Test
-    public void containsSegment() throws IOException {
-        FileStore fileStore = FileStore.builder(getFileStoreFolder()).build();
+    public void containsSegment() throws Exception {
+        FileStore fileStore = fileStoreBuilder(getFileStoreFolder()).build();
         try {
             SegmentId id = new SegmentId(fileStore, 0, 0);
             if (fileStore.containsSegment(id)) {

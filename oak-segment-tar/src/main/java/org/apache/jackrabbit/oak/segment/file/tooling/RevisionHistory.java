@@ -20,23 +20,26 @@
 package org.apache.jackrabbit.oak.segment.file.tooling;
 
 import static com.google.common.base.Preconditions.checkNotNull;
-import static com.google.common.collect.Iterables.transform;
 import static org.apache.jackrabbit.oak.commons.PathUtils.elements;
 import static org.apache.jackrabbit.oak.json.JsonSerializer.DEFAULT_FILTER_EXPRESSION;
+import static org.apache.jackrabbit.oak.segment.file.FileStoreBuilder.fileStoreBuilder;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.Iterator;
 
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
 import com.google.common.base.Function;
+import com.google.common.collect.Iterators;
 import org.apache.jackrabbit.oak.json.BlobSerializer;
 import org.apache.jackrabbit.oak.json.JsonSerializer;
 import org.apache.jackrabbit.oak.segment.SegmentNodeState;
 import org.apache.jackrabbit.oak.segment.file.FileStore;
 import org.apache.jackrabbit.oak.segment.file.FileStore.ReadOnlyStore;
+import org.apache.jackrabbit.oak.segment.file.InvalidFileStoreVersionException;
 import org.apache.jackrabbit.oak.segment.file.JournalReader;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
 
@@ -52,8 +55,8 @@ public class RevisionHistory {
      * @param directory
      * @throws IOException
      */
-    public RevisionHistory(@Nonnull File directory) throws IOException {
-        this.store = FileStore.builder(checkNotNull(directory)).buildReadOnly();
+    public RevisionHistory(@Nonnull File directory) throws IOException, InvalidFileStoreVersionException {
+        this.store = fileStoreBuilder(checkNotNull(directory)).buildReadOnly();
     }
 
     private static NodeState getNode(SegmentNodeState root, String path) {
@@ -73,15 +76,15 @@ public class RevisionHistory {
      * @return
      * @throws IOException
      */
-    public Iterable<HistoryElement> getHistory(@Nonnull File journal, @Nonnull final String path)
+    public Iterator<HistoryElement> getHistory(@Nonnull File journal, @Nonnull final String path)
             throws IOException {
         checkNotNull(path);
-        return transform(new JournalReader(checkNotNull(journal)),
+        return Iterators.transform(new JournalReader(checkNotNull(journal)),
             new Function<String, HistoryElement>() {
                 @Nullable @Override
                 public HistoryElement apply(String revision) {
                     store.setRevision(revision);
-                    NodeState node = getNode(store.getReader().readHeadState(), path);
+                    NodeState node = getNode(store.getHead(), path);
                     return new HistoryElement(revision, node);
                 }
         });

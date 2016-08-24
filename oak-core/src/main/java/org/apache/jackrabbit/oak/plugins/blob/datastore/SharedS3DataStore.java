@@ -19,13 +19,16 @@
 package org.apache.jackrabbit.oak.plugins.blob.datastore;
 
 import org.apache.jackrabbit.core.data.Backend;
+import org.apache.jackrabbit.core.data.DataIdentifier;
 import org.apache.jackrabbit.core.data.DataRecord;
 import org.apache.jackrabbit.core.data.DataStoreException;
 import org.apache.jackrabbit.oak.blob.cloud.aws.s3.S3Backend;
 import org.apache.jackrabbit.oak.blob.cloud.aws.s3.S3DataStore;
 import org.apache.jackrabbit.oak.plugins.blob.SharedDataStore;
 
+import java.io.File;
 import java.io.InputStream;
+import java.util.Iterator;
 import java.util.List;
 
 /**
@@ -49,6 +52,11 @@ public class SharedS3DataStore extends S3DataStore implements SharedDataStore {
     }
 
     @Override
+    public void addMetadataRecord(File f, String name) throws DataStoreException {
+        backend.addMetadataRecord(f, name);
+    }
+
+    @Override
     public DataRecord getMetadataRecord(String name) {
         return backend.getMetadataRecord(name);
     }
@@ -66,6 +74,16 @@ public class SharedS3DataStore extends S3DataStore implements SharedDataStore {
     @Override
     public void deleteAllMetadataRecords(String prefix) {
         backend.deleteAllMetadataRecords(prefix);
+    }
+
+    @Override
+    public Iterator<DataRecord> getAllRecords() {
+        return backend.getAllRecords();
+    }
+
+    @Override
+    public DataRecord getRecordForId(DataIdentifier identifier) throws DataStoreException {
+        return backend.getRecord(identifier);
     }
 
     @Override

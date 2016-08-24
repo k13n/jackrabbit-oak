@@ -20,13 +20,20 @@ import java.io.Closeable;
 import java.io.File;
 import java.io.IOException;
 
+import org.apache.jackrabbit.oak.plugins.segment.SegmentNodeBuilder;
+import org.apache.jackrabbit.oak.plugins.segment.SegmentNodeState;
 import org.apache.jackrabbit.oak.plugins.segment.SegmentNodeStore;
 import org.apache.jackrabbit.oak.plugins.segment.file.FileStore;
 import org.apache.jackrabbit.oak.plugins.segment.file.FileStore.Builder;
+import org.apache.jackrabbit.oak.plugins.segment.file.InvalidFileStoreVersionException;
 import org.apache.jackrabbit.oak.spi.blob.BlobStore;
+import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
+import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
 
 import com.google.common.io.Closer;
+
+import static com.google.common.base.Preconditions.checkArgument;
 
 public class SegmentFactory implements NodeStoreFactory {
 
@@ -37,8 +44,15 @@ public class SegmentFactory implements NodeStoreFactory {
     public SegmentFactory(String directory, boolean mmap) {
         this.dir = new File(directory);
         this.mmap = mmap;
+        createDirectoryIfMissing(dir);
         if (!dir.isDirectory()) {
             throw new IllegalArgumentException("Not a directory: " + dir.getPath());
+        }
+    }
+
+    private void createDirectoryIfMissing(File directory) {
+        if (!directory.exists()) {
+            directory.mkdirs();
         }
     }
 
@@ -49,9 +63,34 @@ public class SegmentFactory implements NodeStoreFactory {
             builder.withBlobStore(blobStore);
         }
         builder.withMaxFileSize(256).withMemoryMapping(mmap);
-        FileStore fs = builder.build();
+        final FileStore fs;
+
+        try {
+            fs = builder.build();
+        } catch (InvalidFileStoreVersionException e) {
+            throw new IllegalStateException(e);
+        }
+
         closer.register(asCloseable(fs));
-        return SegmentNodeStore.builder(fs).build();
+        return new TarNodeStore(SegmentNodeStore.builder(fs).build(), new TarNodeStore.SuperRootProvider() {
+            @Override
+            public void setSuperRoot(NodeBuilder builder) {
+                checkArgument(builder instanceof SegmentNodeBuilder);
+                SegmentNodeBuilder segmentBuilder = (SegmentNodeBuilder) builder;
+                SegmentNodeState lastRoot = (SegmentNodeState) getSuperRoot();
+
+                if (!lastRoot.getRecordId().equals(((SegmentNodeState) segmentBuilder.getBaseState()).getRecordId())) {
+                    throw new IllegalArgumentException("The new head is out of date");
+                }
+
+                fs.setHead(lastRoot, ((SegmentNodeBuilder) builder).getNodeState());
+            }
+
+            @Override
+            public NodeState getSuperRoot() {
+                return fs.getHead();
+            }
+        });
     }
 
     public File getRepositoryDir() {

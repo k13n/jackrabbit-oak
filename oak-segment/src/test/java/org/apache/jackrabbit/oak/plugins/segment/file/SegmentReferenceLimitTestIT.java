@@ -61,7 +61,7 @@ public class SegmentReferenceLimitTestIT {
             .getBoolean(SegmentReferenceLimitTestIT.class.getSimpleName());
 
     @Rule
-    public TemporaryFolder folder = new TemporaryFolder();
+    public TemporaryFolder folder = new TemporaryFolder(new File("target"));
 
     private File getFileStoreFolder() {
         return folder.getRoot();
@@ -73,7 +73,7 @@ public class SegmentReferenceLimitTestIT {
     }
 
     @Test
-    public void corruption() throws IOException, CommitFailedException, ExecutionException, InterruptedException {
+    public void corruption() throws Exception {
         FileStore fileStore = FileStore.builder(getFileStoreFolder()).withMaxFileSize(1)
                 .withNoCache().withMemoryMapping(true).build();
         SegmentNodeStore nodeStore = SegmentNodeStore.builder(fileStore).build();

@@ -135,6 +135,22 @@ public class SharedBlobStoreGCTest {
     }
 
     @Test
+    public void testGCWithNodeSpecialChars() throws Exception {
+        log.debug("Running testGC()");
+        // Only run the mark phase on both the clusters
+        cluster1.initBlobs.addAll(cluster1.addNodeSpecialChars());
+        cluster2.initBlobs.addAll(cluster1.addNodeSpecialChars());
+        cluster1.gc.collectGarbage(true);
+        cluster2.gc.collectGarbage(true);
+
+        // Execute the gc with sweep
+        cluster1.gc.collectGarbage(false);
+
+        Assert.assertEquals(true, Sets.symmetricDifference(Sets.union(cluster1.getInitBlobs(), cluster2.getInitBlobs()),
+            cluster1.getExistingBlobIds()).isEmpty());
+    }
+
+    @Test
     public void testGCStats() throws Exception {
         log.debug("Running testGCStats()");
         // Only run the mark phase on both the clusters to get the stats
@@ -283,6 +299,25 @@ public class SharedBlobStoreGCTest {
                 Thread.sleep(1000);
             }
         }
+
+        private HashSet<String> addNodeSpecialChars() throws Exception {
+            List<String> specialCharSets =
+                Lists.newArrayList("q\\%22afdg\\%22", "a\nbcd", "a\n\rabcd", "012\\efg" );
+            HashSet<String> set = new HashSet<String>();
+            NodeBuilder a = ds.getRoot().builder();
+            for (int i = 0; i < specialCharSets.size(); i++) {
+                Blob b = ds.createBlob(randomStream(i, 18432));
+                NodeBuilder n = a.child("cspecial");
+                n.child(specialCharSets.get(i)).setProperty("x", b);
+                Iterator<String> idIter =
+                    ((GarbageCollectableBlobStore) ds.getBlobStore())
+                        .resolveChunks(b.toString());
+                set.addAll(Lists.newArrayList(idIter));
+            }
+            ds.merge(a, EmptyHook.INSTANCE, CommitInfo.EMPTY);
+            return set;
+        }
+
 
         public Set<String> getExistingBlobIds() throws Exception {
             GarbageCollectableBlobStore store = (GarbageCollectableBlobStore) ds.getBlobStore();

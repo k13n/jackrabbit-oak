@@ -33,8 +33,7 @@ import static org.apache.jackrabbit.oak.segment.Segment.SMALL_LIMIT;
 import static org.apache.jackrabbit.oak.segment.SegmentParser.BlobType.LONG;
 import static org.apache.jackrabbit.oak.segment.SegmentParser.BlobType.MEDIUM;
 import static org.apache.jackrabbit.oak.segment.SegmentParser.BlobType.SMALL;
-import static org.apache.jackrabbit.oak.segment.SegmentVersion.LATEST_VERSION;
-import static org.apache.jackrabbit.oak.segment.SegmentWriters.segmentWriter;
+import static org.apache.jackrabbit.oak.segment.SegmentWriterBuilder.segmentWriterBuilder;
 import static org.apache.jackrabbit.oak.segment.TestUtils.newRecordId;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -57,6 +56,7 @@ import org.apache.jackrabbit.oak.segment.SegmentParser.ValueInfo;
 import org.apache.jackrabbit.oak.segment.memory.MemoryStore;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.junit.Before;
+import org.junit.Ignore;
 import org.junit.Test;
 
 public class SegmentParserTest {
@@ -139,7 +139,7 @@ public class SegmentParserTest {
     @Before
     public void setup() throws IOException {
         store = new MemoryStore();
-        writer = segmentWriter(store, LATEST_VERSION, "", 0);
+        writer = segmentWriterBuilder("").build(store);
     }
 
     @Test
@@ -151,7 +151,6 @@ public class SegmentParserTest {
         assertEquals(node.getRecordId(), info.nodeId);
         assertEquals(0, info.nodeCount);
         assertEquals(0, info.propertyCount);
-        assertEquals(3, info.size);
         assertEquals(info.nodeId.toString10(), info.stableId);
     }
 
@@ -167,7 +166,6 @@ public class SegmentParserTest {
         assertEquals(node.getRecordId(), info.nodeId);
         assertEquals(1, info.nodeCount);
         assertEquals(0, info.propertyCount);
-        assertEquals(6, info.size);
         assertEquals(info.nodeId.toString10(), info.stableId);
     }
 
@@ -188,7 +186,6 @@ public class SegmentParserTest {
         assertEquals(node.getRecordId(), info.nodeId);
         assertEquals(2, info.nodeCount);
         assertEquals(1, info.propertyCount);
-        assertEquals(9, info.size);
         assertEquals(info.nodeId.toString10(), info.stableId);
     }
 
@@ -211,7 +208,6 @@ public class SegmentParserTest {
                 assertFalse(info.manyChildNodes);
                 assertEquals(2, info.mixinCount);
                 assertEquals(1, info.propertyCount);
-                assertEquals(20, info.size);
             }
             @Override protected void onString(RecordId parentId, RecordId stringId) { }
             @Override protected void onNode(RecordId parentId, RecordId nodeId) { }
@@ -228,7 +224,6 @@ public class SegmentParserTest {
             @Override protected void onMapLeaf(RecordId parentId, RecordId mapId, MapRecord map) { }
         }.parseMap(null, map.getRecordId(), map);
         assertEquals(map.getRecordId(), mapInfo.mapId);
-        assertEquals(-1, mapInfo.size);
     }
 
     @Test
@@ -236,37 +231,30 @@ public class SegmentParserTest {
         Random rnd = new Random();
         MapRecord base = writer.writeMap(null, createMap(33, rnd));
         MapRecord map = writer.writeMap(base, createMap(1, rnd));
-        final AtomicInteger size = new AtomicInteger();
         MapInfo mapInfo = new TestParser(store.getReader(), "nonEmptyMap") {
             @Override
             protected void onMapDiff(RecordId parentId, RecordId mapId, MapRecord map) {
                 MapInfo mapInfo = parseMapDiff(mapId, map);
                 assertEquals(mapId, mapInfo.mapId);
-                size.addAndGet(mapInfo.size);
             }
             @Override
             protected void onMap(RecordId parentId, RecordId mapId, MapRecord map) {
                 MapInfo mapInfo = parseMap(parentId, mapId, map);
                 assertEquals(mapId, mapInfo.mapId);
-                size.addAndGet(mapInfo.size);
             }
             @Override
             protected void onMapBranch(RecordId parentId, RecordId mapId, MapRecord map) {
                 MapInfo mapInfo = parseMapBranch(mapId, map);
                 assertEquals(mapId, mapInfo.mapId);
-                size.addAndGet(mapInfo.size);
             }
             @Override
             protected void onMapLeaf(RecordId parentId, RecordId mapId, MapRecord map) {
                 MapInfo mapInfo = parseMapLeaf(mapId, map);
                 assertEquals(mapId, mapInfo.mapId);
-                size.addAndGet(mapInfo.size);
             }
             @Override protected void onString(RecordId parentId, RecordId stringId) { }
         }.parseMap(null, map.getRecordId(), map);
         assertEquals(map.getRecordId(), mapInfo.mapId);
-        assertEquals(-1, mapInfo.size);
-        assertEquals(456, size.get());
     }
 
     private Map<String, RecordId> createMap(int size, Random rnd) throws IOException {
@@ -288,7 +276,6 @@ public class SegmentParserTest {
                 PropertyInfo propertyInfo = parseProperty(parentId, propertyId, template);
                 assertEquals(propertyId, propertyInfo.propertyId);
                 assertEquals(-1, propertyInfo.count);
-                assertEquals(0, propertyInfo.size);
             }
             @Override protected void onTemplate(RecordId parentId, RecordId templateId) { }
             @Override protected void onValue(RecordId parentId, RecordId valueId, Type<?> type) { }
@@ -307,7 +294,6 @@ public class SegmentParserTest {
                 PropertyInfo propertyInfo = parseProperty(parentId, propertyId, template);
                 assertEquals(propertyId, propertyInfo.propertyId);
                 assertEquals(4, propertyInfo.count);
-                assertEquals(7, propertyInfo.size);
             }
             @Override protected void onTemplate(RecordId parentId, RecordId templateId) { }
             @Override protected void onValue(RecordId parentId, RecordId valueId, Type<?> type) { }
@@ -324,7 +310,6 @@ public class SegmentParserTest {
                 BlobInfo blobInfo = parseBlob(blobId);
                 assertEquals(blobId, blobInfo.blobId);
                 assertEquals(SMALL, blobInfo.blobType);
-                assertEquals(5, blobInfo.size);
             }
         }.parseValue(null, blob.getRecordId(), BINARY);
         assertEquals(blob.getRecordId(), valueInfo.valueId);
@@ -340,7 +325,6 @@ public class SegmentParserTest {
                 BlobInfo blobInfo = parseBlob(blobId);
                 assertEquals(blobId, blobInfo.blobId);
                 assertEquals(MEDIUM, blobInfo.blobType);
-                assertEquals(SMALL_LIMIT + 2, blobInfo.size);
             }
         }.parseValue(null, blob.getRecordId(), BINARY);
         assertEquals(blob.getRecordId(), valueInfo.valueId);
@@ -356,7 +340,6 @@ public class SegmentParserTest {
                 BlobInfo blobInfo = parseBlob(blobId);
                 assertEquals(blobId, blobInfo.blobId);
                 assertEquals(LONG, blobInfo.blobType);
-                assertEquals(MEDIUM_LIMIT + 11, blobInfo.size);
             }
             @Override protected void onList(RecordId parentId, RecordId listId, int count) { }
         }.parseValue(null, blob.getRecordId(), BINARY);
@@ -376,7 +359,6 @@ public class SegmentParserTest {
         BlobInfo blobInfo = new TestParser(store.getReader(), "shortString").parseString(stringId);
         assertEquals(stringId, blobInfo.blobId);
         assertEquals(SMALL, blobInfo.blobType);
-        assertEquals(6, blobInfo.size);
     }
 
     @Test
@@ -385,7 +367,6 @@ public class SegmentParserTest {
         BlobInfo blobInfo = new TestParser(store.getReader(), "mediumString").parseString(stringId);
         assertEquals(stringId, blobInfo.blobId);
         assertEquals(MEDIUM, blobInfo.blobType);
-        assertEquals(SMALL_LIMIT + 2, blobInfo.size);
     }
 
     @Test
@@ -396,16 +377,14 @@ public class SegmentParserTest {
         }.parseString(stringId);
         assertEquals(stringId, blobInfo.blobId);
         assertEquals(LONG, blobInfo.blobType);
-        assertEquals(MEDIUM_LIMIT + 11, blobInfo.size);
     }
 
     @Test
     public void emptyList() {
-        RecordId listId = newRecordId(store.getTracker(), new Random());
+        RecordId listId = newRecordId(store, new Random());
         ListInfo listInfo = new TestParser(store.getReader(), "emptyList").parseList(null, listId, 0);
         assertEquals(listId, listInfo.listId);
         assertEquals(0, listInfo.count);
-        assertEquals(0, listInfo.size);
     }
 
     @Test
@@ -425,7 +404,6 @@ public class SegmentParserTest {
         }.parseList(null, listId, count);
         assertEquals(listId, listInfo.listId);
         assertEquals(count, listInfo.count);
-        assertEquals(301185, listInfo.size);
     }
 
 }

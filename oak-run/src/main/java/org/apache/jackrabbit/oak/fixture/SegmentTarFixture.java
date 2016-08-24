@@ -17,12 +17,15 @@
 
 package org.apache.jackrabbit.oak.fixture;
 
+import static org.apache.jackrabbit.oak.segment.file.FileStoreBuilder.fileStoreBuilder;
+
 import java.io.File;
 
 import org.apache.commons.io.FileUtils;
 import org.apache.jackrabbit.oak.Oak;
 import org.apache.jackrabbit.oak.segment.SegmentNodeStoreBuilders;
 import org.apache.jackrabbit.oak.segment.file.FileStore;
+import org.apache.jackrabbit.oak.segment.file.FileStoreBuilder;
 import org.apache.jackrabbit.oak.spi.blob.BlobStore;
 
 class SegmentTarFixture extends OakFixture {
@@ -52,9 +55,9 @@ class SegmentTarFixture extends OakFixture {
 
     @Override
     public Oak getOak(int clusterId) throws Exception {
-        FileStore fs = FileStore.builder(base)
+        FileStore fs = fileStoreBuilder(base)
                 .withMaxFileSize(maxFileSizeMB)
-                .withCacheSize(cacheSizeMB)
+                .withSegmentCacheSize(cacheSizeMB)
                 .withMemoryMapping(memoryMapping)
                 .build();
         return newOak(SegmentNodeStoreBuilders.builder(fs).build());
@@ -75,13 +78,13 @@ class SegmentTarFixture extends OakFixture {
                 blobStore = blobStoreFixtures[i].setUp();
             }
 
-            FileStore.Builder builder = FileStore.builder(new File(base, unique));
+            FileStoreBuilder builder = fileStoreBuilder(new File(base, unique));
             if (blobStore != null) {
                 builder.withBlobStore(blobStore);
             }
             stores[i] = builder
                     .withMaxFileSize(maxFileSizeMB)
-                    .withCacheSize(cacheSizeMB)
+                    .withSegmentCacheSize(cacheSizeMB)
                     .withMemoryMapping(memoryMapping)
                     .build();
             cluster[i] = newOak(SegmentNodeStoreBuilders.builder(stores[i]).build());

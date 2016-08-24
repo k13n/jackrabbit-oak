@@ -264,7 +264,6 @@ public class Utils {
      *     <li>If id is for root path</li>
      *     <li>If id is for an invalid path</li>
      * </ul>
-     *</p>
      * @param id id for which parent id needs to be determined
      * @return parent id. null if parent id cannot be determined
      */
@@ -757,6 +756,21 @@ public class Utils {
             min = Math.min(r.getTimestamp(), min);
         }
         return min;
+    }
+
+    /**
+     * Returns true if all the revisions in the {@code a} greater or equals
+     * to their counterparts in {@code b}. If {@code b} contains revisions
+     * for cluster nodes that are not present in {@code a}, return false.
+     *
+     * @param a
+     * @param b
+     * @return true if all the revisions in the {@code a} are at least
+     * as recent as their counterparts in the {@code b}
+     */
+    public static boolean isGreaterOrEquals(@Nonnull RevisionVector a,
+                                            @Nonnull RevisionVector b) {
+        return a.pmax(b).equals(a);
     }
 
     /**
