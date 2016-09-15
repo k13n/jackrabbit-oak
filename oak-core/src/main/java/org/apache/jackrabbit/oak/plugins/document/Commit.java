@@ -348,6 +348,7 @@ public class Commit {
             }
             operations.put(commitRootPath, commitRoot);
         } catch (DocumentStoreException e) {
+            LOG.info("Exception occurred during commit", e);
             conflictCounter.incrementAndGet();
             // OAK-3084 do not roll back if already committed
             if (success) {
