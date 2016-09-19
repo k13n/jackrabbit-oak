@@ -24,6 +24,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
@@ -64,6 +65,7 @@ public class Commit {
     private final HashMap<String, UpdateOp> operations = new LinkedHashMap<String, UpdateOp>();
     private final Set<Revision> collisions = new LinkedHashSet<Revision>();
     private Branch b;
+    public static final AtomicInteger conflictCounter = new AtomicInteger();
 
     /**
      * List of all node paths which have been modified in this commit. In addition to the nodes
@@ -346,6 +348,7 @@ public class Commit {
             }
             operations.put(commitRootPath, commitRoot);
         } catch (DocumentStoreException e) {
+            conflictCounter.incrementAndGet();
             // OAK-3084 do not roll back if already committed
             if (success) {
                 LOG.error("Exception occurred after commit. Rollback will be suppressed.", e);
