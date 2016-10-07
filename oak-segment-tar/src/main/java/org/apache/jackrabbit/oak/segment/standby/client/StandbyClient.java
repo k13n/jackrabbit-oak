@@ -33,6 +33,7 @@ import io.netty.handler.codec.LengthFieldBasedFrameDecoder;
 import io.netty.handler.codec.compression.SnappyFramedDecoder;
 import io.netty.handler.codec.string.StringEncoder;
 import io.netty.handler.ssl.SslContext;
+import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import io.netty.handler.timeout.ReadTimeoutHandler;
 import io.netty.util.CharsetUtil;
@@ -42,18 +43,27 @@ import org.apache.jackrabbit.oak.segment.standby.codec.GetBlobResponse;
 import org.apache.jackrabbit.oak.segment.standby.codec.GetHeadRequest;
 import org.apache.jackrabbit.oak.segment.standby.codec.GetHeadRequestEncoder;
 import org.apache.jackrabbit.oak.segment.standby.codec.GetHeadResponse;
+import org.apache.jackrabbit.oak.segment.standby.codec.GetReferencesRequest;
+import org.apache.jackrabbit.oak.segment.standby.codec.GetReferencesRequestEncoder;
+import org.apache.jackrabbit.oak.segment.standby.codec.GetReferencesResponse;
 import org.apache.jackrabbit.oak.segment.standby.codec.GetSegmentRequest;
 import org.apache.jackrabbit.oak.segment.standby.codec.GetSegmentRequestEncoder;
 import org.apache.jackrabbit.oak.segment.standby.codec.GetSegmentResponse;
 import org.apache.jackrabbit.oak.segment.standby.codec.ResponseDecoder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 class StandbyClient implements AutoCloseable {
+
+    private static final Logger log = LoggerFactory.getLogger(StandbyClient.class);
 
     private final BlockingQueue<GetHeadResponse> headQueue = new LinkedBlockingDeque<>();
 
     private final BlockingQueue<GetSegmentResponse> segmentQueue = new LinkedBlockingDeque<>();
 
     private final BlockingQueue<GetBlobResponse> blobQueue = new LinkedBlockingDeque<>();
+
+    private final BlockingQueue<GetReferencesResponse> referencesQueue = new LinkedBlockingDeque<>();
 
     private final boolean secure;
 
@@ -77,7 +87,7 @@ class StandbyClient implements AutoCloseable {
         final SslContext sslContext;
 
         if (secure) {
-            sslContext = SslContext.newClientContext(InsecureTrustManagerFactory.INSTANCE);
+            sslContext = SslContextBuilder.forClient().trustManager(InsecureTrustManagerFactory.INSTANCE).build();
         } else {
             sslContext = null;
         }
@@ -119,12 +129,14 @@ class StandbyClient implements AutoCloseable {
                         p.addLast(new GetHeadRequestEncoder());
                         p.addLast(new GetSegmentRequestEncoder());
                         p.addLast(new GetBlobRequestEncoder());
+                        p.addLast(new GetReferencesRequestEncoder());
 
                         // Handlers
 
                         p.addLast(new GetHeadResponseHandler(headQueue));
                         p.addLast(new GetSegmentResponseHandler(segmentQueue));
                         p.addLast(new GetBlobResponseHandler(blobQueue));
+                        p.addLast(new GetReferencesResponseHandler(referencesQueue));
                     }
 
                 });
@@ -134,10 +146,20 @@ class StandbyClient implements AutoCloseable {
 
     @Override
     public void close() throws InterruptedException {
-        channel.close().sync();
+        if (channel.close().awaitUninterruptibly(1, TimeUnit.SECONDS)) {
+            log.debug("Channel closed");
+        } else {
+            log.debug("Channel close timed out");
+        }
+
         channel = null;
 
-        group.shutdownGracefully();
+        if (group.shutdownGracefully(2, 15, TimeUnit.SECONDS).awaitUninterruptibly(20, TimeUnit.SECONDS)) {
+            log.debug("Group shut down");
+        } else {
+            log.debug("Group shutdown timed out");
+        }
+
         group = null;
     }
 
@@ -175,6 +197,18 @@ class StandbyClient implements AutoCloseable {
         }
 
         return response.getBlobData();
+    }
+
+    Iterable<String> getReferences(String segmentId) throws InterruptedException {
+        channel.writeAndFlush(new GetReferencesRequest(clientId, segmentId));
+
+        GetReferencesResponse response = referencesQueue.poll(readTimeoutMs, TimeUnit.MILLISECONDS);
+
+        if (response == null) {
+            return null;
+        }
+
+        return response.getReferences();
     }
 
 }

@@ -16,10 +16,8 @@
  */
 package org.apache.jackrabbit.oak.plugins.document.blob.ds;
 
-import java.io.File;
 import java.util.Date;
 
-import org.apache.commons.io.FileUtils;
 import org.apache.jackrabbit.oak.plugins.blob.datastore.DataStoreBlobStore;
 import org.apache.jackrabbit.oak.plugins.blob.datastore.DataStoreUtils;
 import org.apache.jackrabbit.oak.plugins.document.DocumentMK;
@@ -35,8 +33,8 @@ import org.junit.BeforeClass;
  * 
  */
 public class MongoDataStoreBlobGCTest extends MongoBlobGCTest {
-    Date startDate;
-    DataStoreBlobStore blobStore;
+    protected Date startDate;
+    protected DataStoreBlobStore blobStore;
 
     @BeforeClass
     public static void setUpBeforeClass() throws Exception {
@@ -53,7 +51,7 @@ public class MongoDataStoreBlobGCTest extends MongoBlobGCTest {
         startDate = new Date();
         mongoConnection = connectionFactory.getConnection();
         MongoUtils.dropCollections(mongoConnection.getDB());
-        blobStore = DataStoreUtils.getBlobStore();
+        blobStore = DataStoreUtils.getBlobStore(folder.newFolder());
         mk = new DocumentMK.Builder().clock(getTestClock()).setMongoDB(mongoConnection.getDB())
                 .setBlobStore(blobStore).open();
     }
@@ -61,8 +59,6 @@ public class MongoDataStoreBlobGCTest extends MongoBlobGCTest {
     @After
     @Override
     public void tearDownConnection() throws Exception {
-        DataStoreUtils.cleanup(blobStore.getDataStore(), startDate);
-        FileUtils.deleteDirectory(new File(DataStoreUtils.getHomeDir()));
         mk.dispose();
         MongoUtils.dropCollections(connectionFactory.getConnection().getDB());
     }

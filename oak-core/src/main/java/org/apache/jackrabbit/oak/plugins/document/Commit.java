@@ -181,9 +181,12 @@ public class Commit {
                 success = true;
             } finally {
                 if (!success) {
-                    b.removeCommit(rev.asBranchRevision());
-                    if (!b.hasCommits()) {
-                        nodeStore.getBranches().remove(b);
+                    Branch branch = getBranch();
+                    if (branch != null) {
+                        branch.removeCommit(rev.asBranchRevision());
+                        if (!branch.hasCommits()) {
+                            nodeStore.getBranches().remove(branch);
+                        }
                     }
                 }
             }
@@ -244,7 +247,7 @@ public class Commit {
         // regular commits use "c", which makes the commit visible to
         // other readers. branch commits use the base revision to indicate
         // the visibility of the commit
-        String commitValue = baseBranchRevision != null ? baseBranchRevision.toString() : "c";
+        String commitValue = baseBranchRevision != null ? baseBranchRevision.getBranchRevision().toString() : "c";
         DocumentStore store = nodeStore.getDocumentStore();
         String commitRootPath = null;
         if (baseBranchRevision != null) {

@@ -465,19 +465,10 @@ public class SegmentNodeStoreService extends ProxyNodeStore
 
         // Expose an MBean to trigger garbage collection
 
-        Runnable triggerGarbageCollection = new Runnable() {
-
-            @Override
-            public void run() {
-                store.gc();
-            }
-
-        };
-
         registrations.add(registerMBean(
                 whiteboard,
                 RevisionGCMBean.class,
-                new RevisionGC(triggerGarbageCollection, executor),
+                new RevisionGC(store.getGCRunner(), executor),
                 RevisionGCMBean.TYPE,
                 "Segment node store revision garbage collection"
         ));
@@ -520,7 +511,7 @@ public class SegmentNodeStoreService extends ProxyNodeStore
         int forceTimeout = toInteger(property(COMPACTION_FORCE_TIMEOUT), FORCE_TIMEOUT_DEFAULT);
 
         byte gainThreshold = getGainThreshold();
-        long sizeDeltaEstimation = toLong(COMPACTION_SIZE_DELTA_ESTIMATION, SIZE_DELTA_ESTIMATION_DEFAULT);
+        long sizeDeltaEstimation = toLong(property(COMPACTION_SIZE_DELTA_ESTIMATION), SIZE_DELTA_ESTIMATION_DEFAULT);
 
         return new SegmentGCOptions(pauseCompaction, gainThreshold, retryCount, forceTimeout)
                 .setGcSizeDeltaEstimation(sizeDeltaEstimation);
