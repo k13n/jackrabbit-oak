@@ -24,6 +24,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
@@ -56,6 +57,7 @@ import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.SPLIT_CAND
  */
 public class Commit {
 
+    public static AtomicInteger conflictCounter = new AtomicInteger();
     private static final Logger LOG = LoggerFactory.getLogger(Commit.class);
 
     protected final DocumentNodeStore nodeStore;
@@ -349,6 +351,7 @@ public class Commit {
             }
             operations.put(commitRootPath, commitRoot);
         } catch (DocumentStoreException e) {
+            conflictCounter.incrementAndGet();
             // OAK-3084 do not roll back if already committed
             if (success) {
                 LOG.error("Exception occurred after commit. Rollback will be suppressed.", e);

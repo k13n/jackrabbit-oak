@@ -121,7 +121,7 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
 
             // Drop the match value,  if present
             if (builder.exists()) {
-                builder.removeProperty("match");
+                builder.setProperty("match", false);
             }
 
             // Prune all index nodes that are no longer needed
@@ -586,7 +586,10 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
             if (node.getBoolean("match") || node.getChildNodeCount(1) > 0) {
                 return;
             } else if (node.exists()) {
-                node.remove();
+                Long nrReincarnations = node.getProperty(":reincarnations").getValue(Type.LONG);
+                if (nrReincarnations == null || nrReincarnations < 10) {
+                    node.remove();
+                }
             }
         }
     }
