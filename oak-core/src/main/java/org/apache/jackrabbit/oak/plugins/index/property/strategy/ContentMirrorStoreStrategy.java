@@ -79,6 +79,7 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
      * logging a warning every {@code oak.traversing.warn} traversed nodes. Default {@code 10000}
      */
     public static final int TRAVERSING_WARN = Integer.getInteger("oak.traversing.warn", 10000);
+    private static final int VOLATILITY = Integer.getInteger("oak.index.volatility", 5);
 
     private final String indexName;
 
@@ -586,8 +587,8 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
             if (node.getBoolean("match") || node.getChildNodeCount(1) > 0) {
                 return;
             } else if (node.exists()) {
-                Long nrReincarnations = node.getProperty(":reincarnations").getValue(Type.LONG);
-                if (nrReincarnations == null || nrReincarnations < 10) {
+                Long delCount = node.getProperty(":delCount").getValue(Type.LONG);
+                if (delCount == null || delCount < VOLATILITY) {
                     node.remove();
                 }
             }

@@ -1056,9 +1056,14 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
             ((RevisionListener) store).updateAccessedRevision(lastRevision);
         }
 
-        SortedMap<Revision, String> reincarnations = getLocalDeleted();
-        int nrReincarnations = reincarnations.size();
-        props.add(nodeStore.createPropertyState(":reincarnations", String.valueOf(nrReincarnations)));
+        SortedMap<Revision, String> deletions = getLocalDeleted();
+        int delCount = 0;
+        for (String val : deletions.values()) {
+            if ("true".equals(val)) {
+                ++delCount;
+            }
+        }
+        props.add(nodeStore.createPropertyState(":delCount", String.valueOf(delCount)));
 
         return new DocumentNodeState(nodeStore, path, readRevision, props, hasChildren(), lastRevision);
     }
