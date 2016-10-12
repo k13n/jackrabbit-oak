@@ -54,6 +54,7 @@ import org.apache.jackrabbit.oak.commons.json.JsopTokenizer;
 import org.apache.jackrabbit.oak.commons.json.JsopWriter;
 import org.apache.jackrabbit.oak.plugins.document.memory.MemoryDocumentStore;
 import org.apache.jackrabbit.oak.plugins.document.util.Utils;
+import org.apache.jackrabbit.oak.plugins.index.property.strategy.ContentMirrorStoreStrategy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -206,6 +207,12 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
      * Value: the revision.
      */
     private static final String LAST_REV = "_lastRev";
+
+
+    /**
+     * The number of times this node was deleted in the past
+     */
+    public static final String DEL_COUNT = "_delCount";
 
     /**
      * Flag indicating that there are child nodes present. Its just used as a hint.
@@ -1056,17 +1063,40 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
             ((RevisionListener) store).updateAccessedRevision(lastRevision);
         }
 
-        SortedMap<Revision, String> deletions = getLocalDeleted();
-        int delCount = 0;
-        for (String val : deletions.values()) {
-            if ("true".equals(val)) {
-                ++delCount;
-            }
-        }
-        props.add(nodeStore.createPropertyState(":delCount", String.valueOf(delCount)));
+        int delCount = computeDelCount();
+        props.add(nodeStore.createPropertyState(DEL_COUNT, String.valueOf(delCount)));
 
         return new DocumentNodeState(nodeStore, path, readRevision, props, hasChildren(), lastRevision);
     }
+
+    private int computeDelCount() {
+        int delCount = computeDelCount(this, 0);
+        if (delCount >= ContentMirrorStoreStrategy.VOLATILITY) {
+            return delCount;
+        }
+
+        for (NodeDocument doc : getPreviousDocs(DELETED, null)) {
+            delCount += computeDelCount(doc, delCount);
+            if (delCount >= ContentMirrorStoreStrategy.VOLATILITY) {
+                return delCount;
+            }
+        }
+
+        return delCount;
+    }
+
+    private int computeDelCount(NodeDocument doc, int delCount) {
+        for (String val : doc.getLocalDeleted().values()) {
+            if ("true".equals(val)) {
+                ++delCount;
+                if (delCount == ContentMirrorStoreStrategy.VOLATILITY) {
+                    break;
+                }
+            }
+        }
+        return delCount;
+    }
+
 
     /**
      * Get the earliest (oldest) revision where the node was alive at or before

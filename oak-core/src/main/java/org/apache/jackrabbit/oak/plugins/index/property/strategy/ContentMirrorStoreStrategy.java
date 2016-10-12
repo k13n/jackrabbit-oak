@@ -17,6 +17,7 @@
 package org.apache.jackrabbit.oak.plugins.index.property.strategy;
 
 import static com.google.common.collect.Queues.newArrayDeque;
+import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.DEL_COUNT;
 import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.INDEX_CONTENT_NODE_NAME;
 import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.ENTRY_COUNT_PROPERTY_NAME;
 import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.KEY_COUNT_PROPERTY_NAME;
@@ -31,6 +32,7 @@ import javax.annotation.Nullable;
 import org.apache.jackrabbit.oak.api.PropertyState;
 import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.commons.PathUtils;
+import org.apache.jackrabbit.oak.plugins.document.NodeDocument;
 import org.apache.jackrabbit.oak.plugins.index.counter.NodeCounterEditor;
 import org.apache.jackrabbit.oak.plugins.index.counter.jmx.NodeCounter;
 import org.apache.jackrabbit.oak.plugins.memory.MemoryChildNodeEntry;
@@ -79,7 +81,7 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
      * logging a warning every {@code oak.traversing.warn} traversed nodes. Default {@code 10000}
      */
     public static final int TRAVERSING_WARN = Integer.getInteger("oak.traversing.warn", 10000);
-    private static final int VOLATILITY = Integer.getInteger("oak.index.volatility", 5);
+    public static final int VOLATILITY = Integer.getInteger("oak.index.volatility", 5);
 
     private final String indexName;
 
@@ -587,8 +589,7 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
             if (node.getBoolean("match") || node.getChildNodeCount(1) > 0) {
                 return;
             } else if (node.exists()) {
-                Long delCount = node.getProperty(":delCount").getValue(Type.LONG);
-                if (delCount == null || delCount < VOLATILITY) {
+                if (!node.hasProperty(DEL_COUNT) || node.getProperty(DEL_COUNT).getValue(Type.LONG) < VOLATILITY) {
                     node.remove();
                 }
             }
