@@ -1063,20 +1063,26 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
             ((RevisionListener) store).updateAccessedRevision(lastRevision);
         }
 
-        int delCount = computeDelCount();
+        long delCount = computeDelCount();
         props.add(nodeStore.createPropertyState(DEL_COUNT, String.valueOf(delCount)));
 
         return new DocumentNodeState(nodeStore, path, readRevision, props, hasChildren(), lastRevision);
     }
 
-    private int computeDelCount() {
-        int delCount = computeDelCount(this, 0);
+
+    private long computeDelCount() {
+        Long count = (Long) get(DEL_COUNT);
+        return count == null ? 0 : count;
+    }
+
+    private long computeDocumentDelCount() {
+        long delCount = computeDocumentDelCount(this, 0);
         if (delCount >= ContentMirrorStoreStrategy.VOLATILITY) {
             return delCount;
         }
 
         for (NodeDocument doc : getPreviousDocs(DELETED, null)) {
-            delCount += computeDelCount(doc, delCount);
+            delCount += computeDocumentDelCount(doc, delCount);
             if (delCount >= ContentMirrorStoreStrategy.VOLATILITY) {
                 return delCount;
             }
@@ -1085,7 +1091,7 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
         return delCount;
     }
 
-    private int computeDelCount(NodeDocument doc, int delCount) {
+    private long computeDocumentDelCount(NodeDocument doc, long delCount) {
         for (String val : doc.getLocalDeleted().values()) {
             if ("true".equals(val)) {
                 ++delCount;
@@ -1753,6 +1759,7 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
             //DELETED_ONCE would be set upon every delete.
             //possibly we can avoid that
             setDeletedOnce(op);
+            checkNotNull(op).increment(DEL_COUNT, 1);
         }
         checkNotNull(op).setMapEntry(DELETED, checkNotNull(revision), String.valueOf(deleted));
     }
