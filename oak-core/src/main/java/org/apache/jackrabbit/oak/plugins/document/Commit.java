@@ -66,7 +66,6 @@ public class Commit {
     private final HashMap<String, UpdateOp> operations = new LinkedHashMap<String, UpdateOp>();
     private final Set<Revision> collisions = new LinkedHashSet<Revision>();
     private Branch b;
-    public static final AtomicInteger conflictCounter = new AtomicInteger();
 
     /**
      * List of all node paths which have been modified in this commit. In addition to the nodes
