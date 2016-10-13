@@ -108,10 +108,10 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
     }
 
     private void remove(NodeBuilder index, String key, String value) {
-//        ApproximateCounter.adjustCountSync(index, -1);
+        ApproximateCounter.adjustCountSync(index, -1);
         NodeBuilder builder = index.getChildNode(key);
         if (builder.exists()) {
-//            ApproximateCounter.adjustCountSync(builder, -1);
+            ApproximateCounter.adjustCountSync(builder, -1);
             // Collect all builders along the given path
             Deque<NodeBuilder> builders = newArrayDeque();
             builders.addFirst(builder);
