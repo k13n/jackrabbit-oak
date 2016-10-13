@@ -391,5 +391,4 @@ public interface NodeState {
             return input != null && input.exists();
         }
     };
-
 }

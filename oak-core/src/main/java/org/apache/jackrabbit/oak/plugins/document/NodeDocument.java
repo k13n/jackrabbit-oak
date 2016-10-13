@@ -54,6 +54,7 @@ import org.apache.jackrabbit.oak.commons.json.JsopTokenizer;
 import org.apache.jackrabbit.oak.commons.json.JsopWriter;
 import org.apache.jackrabbit.oak.plugins.document.memory.MemoryDocumentStore;
 import org.apache.jackrabbit.oak.plugins.document.util.Utils;
+import org.apache.jackrabbit.oak.plugins.index.property.strategy.ContentMirrorStoreStrategy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -207,6 +208,12 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
      */
     private static final String LAST_REV = "_lastRev";
 
+
+    /**
+     * The number of times this node was deleted in the past
+     */
+    public static final String DEL_COUNT = "_delCount";
+
     /**
      * Flag indicating that there are child nodes present. Its just used as a hint.
      * If false then that indicates that there are no child. However if its true its
@@ -342,12 +349,12 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
     /**
      * Time at which this object was check for cache consistency
      */
-    private final AtomicLong lastCheckTime = new AtomicLong(System.currentTimeMillis());
+    private final AtomicLong lastCheckTime = new AtomicLong(Revision.getCurrentTimestamp());
 
     private final long creationTime;
 
     NodeDocument(@Nonnull DocumentStore store) {
-        this(store, System.currentTimeMillis());
+        this(store, Revision.getCurrentTimestamp());
     }
 
     /**
@@ -1056,8 +1063,46 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
             ((RevisionListener) store).updateAccessedRevision(lastRevision);
         }
 
+        long delCount = computeDelCount();
+        props.add(nodeStore.createPropertyState(DEL_COUNT, String.valueOf(delCount)));
+
         return new DocumentNodeState(nodeStore, path, readRevision, props, hasChildren(), lastRevision);
     }
+
+
+    private long computeDelCount() {
+        Long count = (Long) get(DEL_COUNT);
+        return count == null ? 0 : count;
+    }
+
+    private long computeDocumentDelCount() {
+        long delCount = computeDocumentDelCount(this, 0);
+        if (delCount >= ContentMirrorStoreStrategy.VOLATILITY) {
+            return delCount;
+        }
+
+        for (NodeDocument doc : getPreviousDocs(DELETED, null)) {
+            delCount += computeDocumentDelCount(doc, delCount);
+            if (delCount >= ContentMirrorStoreStrategy.VOLATILITY) {
+                return delCount;
+            }
+        }
+
+        return delCount;
+    }
+
+    private long computeDocumentDelCount(NodeDocument doc, long delCount) {
+        for (String val : doc.getLocalDeleted().values()) {
+            if ("true".equals(val)) {
+                ++delCount;
+                if (delCount == ContentMirrorStoreStrategy.VOLATILITY) {
+                    break;
+                }
+            }
+        }
+        return delCount;
+    }
+
 
     /**
      * Get the earliest (oldest) revision where the node was alive at or before
@@ -1316,7 +1361,7 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
                         return Collections.singleton(prev);
                     }
                 } else {
-                    LOG.warn("Document with previous revisions not found: " + prevId);
+                    previousDocumentNotFound(prevId, revision);
                 }
             }
 
@@ -1433,7 +1478,7 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
         if (prev != null) {
             return prev;
         } else {
-            LOG.warn("Document with previous revisions not found: " + prevId);
+            previousDocumentNotFound(prevId, rev);
         }
         return null;
     }
@@ -1714,6 +1759,7 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
             //DELETED_ONCE would be set upon every delete.
             //possibly we can avoid that
             setDeletedOnce(op);
+            checkNotNull(op).increment(DEL_COUNT, 1);
         }
         checkNotNull(op).setMapEntry(DELETED, checkNotNull(revision), String.valueOf(deleted));
     }
@@ -1760,6 +1806,32 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
     }
 
     //----------------------------< internal >----------------------------------
+
+    private void previousDocumentNotFound(String prevId, Revision rev) {
+        LOG.warn("Document with previous revisions not found: " + prevId);
+        // main document may be stale, evict it from the cache if it is
+        // older than one minute. We don't want to invalidate a document
+        // too frequently if the document structure is really broken.
+        String path = getMainPath();
+        String id = Utils.getIdFromPath(path);
+        NodeDocument doc = store.getIfCached(NODES, id);
+        long now = Revision.getCurrentTimestamp();
+        while (doc != null
+                && doc.getCreated() + TimeUnit.MINUTES.toMillis(1) < now) {
+            LOG.info("Invalidated cached document {}", id);
+            store.invalidateCache(NODES, id);
+            // also invalidate intermediate docs if there are any matching
+            Iterable<Range> ranges = doc.getPreviousRanges().values();
+            doc = null;
+            for (Range range : ranges) {
+                if (range.includes(rev)) {
+                    id = Utils.getPreviousIdFor(path, range.high, range.height);
+                    doc = store.getIfCached(NODES, id);
+                    break;
+                }
+            }
+        }
+    }
 
     private LastRevs createLastRevs(@Nonnull RevisionVector readRevision,
                                     @Nonnull Map<Revision, String> validRevisions,
@@ -1962,6 +2034,8 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
             }
         } else {
             // branch commit (not merged)
+            // read as RevisionVector, even though this should be
+            // a Revision only. See OAK-4840
             RevisionVector branchCommit = RevisionVector.fromString(commitValue);
             if (branchCommit.getBranchRevision().getClusterId() != context.getClusterId()) {
                 // this is an unmerged branch commit from another cluster node,

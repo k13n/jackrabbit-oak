@@ -58,7 +58,9 @@ import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.oak.stats.Clock;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -68,8 +70,11 @@ import org.slf4j.LoggerFactory;
 public class SharedBlobStoreGCTest {
     private static final Logger log = LoggerFactory.getLogger(SharedBlobStoreGCTest.class);
 
-    private Cluster cluster1;
-    private Cluster cluster2;
+    @Rule
+    public TemporaryFolder folder = new TemporaryFolder(new File("target"));
+
+    protected Cluster cluster1;
+    protected Cluster cluster2;
     private Clock clock;
 
     @Before
@@ -80,7 +85,8 @@ public class SharedBlobStoreGCTest {
         clock.waitUntil(Revision.getCurrentTimestamp());
         DataStoreUtils.time = clock.getTime();
 
-        BlobStore blobeStore1 = DataStoreUtils.getBlobStore();
+        File rootFolder = folder.newFolder();
+        BlobStore blobeStore1 = getBlobStore(rootFolder);
         DocumentNodeStore ds1 = new DocumentMK.Builder()
                 .setAsyncDelay(0)
                 .setDocumentStore(new MemoryDocumentStore())
@@ -92,7 +98,7 @@ public class SharedBlobStoreGCTest {
         ((SharedDataStore) blobeStore1).addMetadataRecord(new ByteArrayInputStream(new byte[0]),
             SharedStoreRecordType.REPOSITORY.getNameFromId(repoId1));
 
-        BlobStore blobeStore2 = DataStoreUtils.getBlobStore();
+        BlobStore blobeStore2 = getBlobStore(rootFolder);
         DocumentNodeStore ds2 = new DocumentMK.Builder()
                 .setAsyncDelay(0)
                 .setDocumentStore(new MemoryDocumentStore())
@@ -218,14 +224,16 @@ public class SharedBlobStoreGCTest {
 
     @After
     public void tearDown() throws Exception {
-        DataStoreUtils.cleanup(cluster1.getDataStore(), cluster1.getDate());
-        FileUtils.cleanDirectory((new File(DataStoreUtils.getHomeDir())).getParentFile());
         DataStoreUtils.time = -1;
         cluster1.getDocumentNodeStore().dispose();
         cluster2.getDocumentNodeStore().dispose();
     }
 
-    class Cluster {
+    protected DataStoreBlobStore getBlobStore(File root) throws Exception {
+        return DataStoreUtils.getBlobStore(root);
+    }
+
+    public class Cluster {
         private DocumentNodeStore ds;
         private int seed;
         private BlobGarbageCollector gc;
@@ -294,10 +302,7 @@ public class SharedBlobStoreGCTest {
             VersionGarbageCollector vGC = ds.getVersionGarbageCollector();
             VersionGCStats stats = vGC.gc(0, TimeUnit.MILLISECONDS);
             Assert.assertEquals(deletes.size(), stats.deletedDocGCCount);
-
-            if (DataStoreUtils.isS3DataStore()) {
-                Thread.sleep(1000);
-            }
+            sleep();
         }
 
         private HashSet<String> addNodeSpecialChars() throws Exception {
@@ -341,6 +346,9 @@ public class SharedBlobStoreGCTest {
         public DocumentNodeStore getDocumentNodeStore() {
             return ds;
         }
+    }
+
+    protected void sleep() throws InterruptedException {
     }
 }
 

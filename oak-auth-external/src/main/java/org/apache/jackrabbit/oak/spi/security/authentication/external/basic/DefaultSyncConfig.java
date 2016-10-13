@@ -87,6 +87,8 @@ public class DefaultSyncConfig {
 
         private String pathPrefix;
 
+        private boolean applyRFC7613UsernameCaseMapped;
+
         /**
          * Returns the duration in milliseconds until a synced authorizable gets expired. An expired authorizable will
          * be re-synced.
@@ -105,6 +107,27 @@ public class DefaultSyncConfig {
         @Nonnull
         public Authorizable setExpirationTime(long expirationTime) {
             this.expirationTime = expirationTime;
+            return this;
+        }
+
+        /**
+         * Returns true if new AuthorizableIDs will be normalized according to
+         * the UsernameCaseMapped profile defined in RFC7613
+         * @return true if new AuthorizableIDs will be normalized.
+         */
+        public boolean isApplyRFC7613UsernameCaseMapped() {
+            return applyRFC7613UsernameCaseMapped;
+        }
+
+        /**
+         * Set to true if new AuthorizableIDs shall be normalized according to
+         * the UsernameCaseMapped profile defined in RFC7613.
+         * @param true if the UsernameCaseMapped profile shall be used for normalization.
+         * @return {@code this}
+         * @see #isApplyRFC7613UsernameCaseMapped()
+         */
+        public Authorizable setApplyRFC7613UsernameCaseMapped(boolean applyRFC7613UsernameCaseMapped) {
+            this.applyRFC7613UsernameCaseMapped = applyRFC7613UsernameCaseMapped;
             return this;
         }
 
@@ -206,6 +229,8 @@ public class DefaultSyncConfig {
 
         private boolean dynamicMembership;
 
+        private boolean disableMissing;
+
         /**
          * Returns the duration in milliseconds until the group membership of a user is expired. If the
          * membership information is expired it is re-synced according to the maximum nesting depth.
@@ -287,6 +312,22 @@ public class DefaultSyncConfig {
             return this;
         }
 
+        /**
+         * Controls the behavior for users that no longer exist on the external provider. The default is to delete the repository users
+         * if they no longer exist on the external provider. If set to true, they will be disabled instead, and re-enabled once they appear
+         * again.
+         */
+        public boolean getDisableMissing() {
+            return disableMissing;
+        }
+
+        /**
+         * @see #getDisableMissing()
+         */
+        public User setDisableMissing(boolean disableMissing) {
+            this.disableMissing = disableMissing;
+            return this;
+        }
     }
 
     /**

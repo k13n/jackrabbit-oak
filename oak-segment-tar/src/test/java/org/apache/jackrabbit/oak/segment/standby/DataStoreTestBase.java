@@ -38,12 +38,11 @@ import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.api.PropertyState;
 import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.plugins.blob.datastore.DataStoreBlobStore;
-import org.apache.jackrabbit.oak.segment.NetworkErrorProxy;
 import org.apache.jackrabbit.oak.segment.SegmentNodeStoreBuilders;
 import org.apache.jackrabbit.oak.segment.file.FileStore;
 import org.apache.jackrabbit.oak.segment.file.FileStoreBuilder;
-import org.apache.jackrabbit.oak.segment.standby.client.StandbySync;
-import org.apache.jackrabbit.oak.segment.standby.server.StandbyServer;
+import org.apache.jackrabbit.oak.segment.standby.client.StandbyClientSync;
+import org.apache.jackrabbit.oak.segment.standby.server.StandbyServerSync;
 import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
 import org.apache.jackrabbit.oak.spi.commit.EmptyHook;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
@@ -107,18 +106,18 @@ public class DataStoreTestBase extends TestBase {
         FileStore secondary = getSecondary();
 
         NodeStore store = SegmentNodeStoreBuilders.builder(primary).build();
-        final StandbyServer server = new StandbyServer(port, primary);
-        server.start();
+        final StandbyServerSync serverSync = new StandbyServerSync(port, primary);
+        serverSync.start();
         byte[] data = addTestContent(store, "server", blobSize);
         primary.flush();
 
-        StandbySync cl = newStandbySync(secondary);
+        StandbyClientSync cl = newStandbyClientSync(secondary);
         cl.run();
 
         try {
             assertEquals(primary.getHead(), secondary.getHead());
         } finally {
-            server.close();
+            serverSync.close();
             cl.close();
         }
 
@@ -183,13 +182,13 @@ public class DataStoreTestBase extends TestBase {
         p.run();
 
         NodeStore store = SegmentNodeStoreBuilders.builder(primary).build();
-        final StandbyServer server = new StandbyServer(port, primary);
-        server.start();
+        final StandbyServerSync serverSync = new StandbyServerSync(port, primary);
+        serverSync.start();
         byte[] data = addTestContent(store, "server", blobSize);
         primary.flush();
 
-        StandbySync cl = newStandbySync(secondary, proxyPort);
-        cl.run();
+        StandbyClientSync clientSync = newStandbyClientSync(secondary, proxyPort);
+        clientSync.run();
 
         try {
             if (skipBytes > 0 || flipPosition >= 0) {
@@ -202,12 +201,12 @@ public class DataStoreTestBase extends TestBase {
                     data = addTestContent(store, "server", blobSize);
                     primary.flush();
                 }
-                cl.run();
+                clientSync.run();
             }
             assertEquals(primary.getHead(), secondary.getHead());
         } finally {
-            server.close();
-            cl.close();
+            serverSync.close();
+            clientSync.close();
             p.close();
         }
 

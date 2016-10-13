@@ -57,6 +57,7 @@ import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.SPLIT_CAND
  */
 public class Commit {
 
+    public static AtomicInteger conflictCounter = new AtomicInteger();
     private static final Logger LOG = LoggerFactory.getLogger(Commit.class);
 
     protected final DocumentNodeStore nodeStore;
@@ -181,9 +182,12 @@ public class Commit {
                 success = true;
             } finally {
                 if (!success) {
-                    b.removeCommit(rev.asBranchRevision());
-                    if (!b.hasCommits()) {
-                        nodeStore.getBranches().remove(b);
+                    Branch branch = getBranch();
+                    if (branch != null) {
+                        branch.removeCommit(rev.asBranchRevision());
+                        if (!branch.hasCommits()) {
+                            nodeStore.getBranches().remove(branch);
+                        }
                     }
                 }
             }
@@ -244,7 +248,7 @@ public class Commit {
         // regular commits use "c", which makes the commit visible to
         // other readers. branch commits use the base revision to indicate
         // the visibility of the commit
-        String commitValue = baseBranchRevision != null ? baseBranchRevision.toString() : "c";
+        String commitValue = baseBranchRevision != null ? baseBranchRevision.getBranchRevision().toString() : "c";
         DocumentStore store = nodeStore.getDocumentStore();
         String commitRootPath = null;
         if (baseBranchRevision != null) {
@@ -348,6 +352,7 @@ public class Commit {
             }
             operations.put(commitRootPath, commitRoot);
         } catch (DocumentStoreException e) {
+            LOG.debug("Conflict during commit", e);
             conflictCounter.incrementAndGet();
             // OAK-3084 do not roll back if already committed
             if (success) {
